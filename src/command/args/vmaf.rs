@@ -1,10 +1,10 @@
 use crate::command::args::PixelFormat;
 use anyhow::Context;
 use clap::Parser;
-use std::{borrow::Cow, fmt::Display, sync::Arc, thread};
+use std::{borrow::Cow, fmt::Display, path::PathBuf, sync::Arc, thread};
 
 /// Common vmaf options.
-#[derive(Parser, Clone, Hash)]
+#[derive(Parser, Clone, Hash, Debug)]
 pub struct Vmaf {
     /// Additional vmaf arg(s). E.g. --vmaf n_threads=8 --vmaf n_subsample=4
     ///
@@ -45,6 +45,7 @@ impl Vmaf {
         distorted_res: Option<(u32, u32)>,
         pix_fmt: PixelFormat,
         ref_vfilter: Option<&str>,
+        logfile_name: Option<PathBuf>,
     ) -> String {
         let mut args = self.vmaf_args.clone();
         if !args.iter().any(|a| a.contains("n_threads")) {
@@ -58,7 +59,7 @@ impl Vmaf {
             );
         }
         let mut lavfi = args.join(":");
-        lavfi.insert_str(0, "libvmaf=");
+        lavfi.insert_str(0, "libvmaf=log_fmt=json:");
 
         let mut model = VmafModel::from_args(&args);
         if let (None, Some((w, h))) = (model, distorted_res) {
@@ -93,6 +94,13 @@ impl Vmaf {
         };
 
         lavfi.insert_str(0, &prefix);
+        match logfile_name {
+            Some(x) => {
+                lavfi.push_str(":log_path=");
+                lavfi.push_str(x.to_str().unwrap());
+            }
+            None => (),
+        }
         lavfi
     }
 
@@ -198,11 +206,18 @@ fn vmaf_lavfi() {
         vmaf_args: vec!["n_threads=5".into(), "n_subsample=4".into()],
         vmaf_scale: VmafScale::Auto,
     };
+    let mut file = PathBuf::new();
+    file.set_file_name("vmaf_stats.json");
     assert_eq!(
-        vmaf.ffmpeg_lavfi(None, PixelFormat::Yuv420p, Some("scale=1280:-1,fps=24")),
+        vmaf.ffmpeg_lavfi(
+            None,
+            PixelFormat::Yuv420p,
+            Some("scale=1280:-1,fps=24"),
+            Some(file)
+        ),
         "[0:v]format=yuv420p,setpts=PTS-STARTPTS[dis];\
          [1:v]format=yuv420p,scale=1280:-1,fps=24,setpts=PTS-STARTPTS[ref];\
-         [dis][ref]libvmaf=n_threads=5:n_subsample=4"
+         [dis][ref]libvmaf=log_fmt=json:n_threads=5:n_subsample=4:log_path=vmaf_stats.json"
     );
 }
 
@@ -212,14 +227,16 @@ fn vmaf_lavfi_default() {
         vmaf_args: vec![],
         vmaf_scale: VmafScale::Auto,
     };
+    let mut file = PathBuf::new();
+    file.set_file_name("vmaf_stats.json");
     let expected = format!(
         "[0:v]format=yuv420p10le,setpts=PTS-STARTPTS[dis];\
          [1:v]format=yuv420p10le,setpts=PTS-STARTPTS[ref];\
-         [dis][ref]libvmaf=n_threads={}",
+         [dis][ref]libvmaf=log_fmt=json:n_threads={}:log_path=vmaf_stats.json",
         thread::available_parallelism().map_or(1, |p| p.get())
     );
     assert_eq!(
-        vmaf.ffmpeg_lavfi(None, PixelFormat::Yuv420p10le, None),
+        vmaf.ffmpeg_lavfi(None, PixelFormat::Yuv420p10le, None, Some(file)),
         expected
     );
 }
@@ -227,17 +244,19 @@ fn vmaf_lavfi_default() {
 #[test]
 fn vmaf_lavfi_include_n_threads() {
     let vmaf = Vmaf {
-        vmaf_args: vec!["log_path=output.xml".into()],
+        vmaf_args: vec![],
         vmaf_scale: VmafScale::Auto,
     };
+    let mut file = PathBuf::new();
+    file.set_file_name("vmaf_stats.json");
     let expected = format!(
         "[0:v]format=yuv420p,setpts=PTS-STARTPTS[dis];\
          [1:v]format=yuv420p,setpts=PTS-STARTPTS[ref];\
-         [dis][ref]libvmaf=log_path=output.xml:n_threads={}",
+         [dis][ref]libvmaf=log_fmt=json:n_threads={}:log_path=vmaf_stats.json",
         thread::available_parallelism().map_or(1, |p| p.get())
     );
     assert_eq!(
-        vmaf.ffmpeg_lavfi(None, PixelFormat::Yuv420p, None),
+        vmaf.ffmpeg_lavfi(None, PixelFormat::Yuv420p, None, Some(file)),
         expected
     );
 }
@@ -249,11 +268,13 @@ fn vmaf_lavfi_small_width() {
         vmaf_args: vec!["n_threads=5".into(), "n_subsample=4".into()],
         vmaf_scale: VmafScale::Auto,
     };
+    let mut file = PathBuf::new();
+    file.set_file_name("vmaf_stats.json");
     assert_eq!(
-        vmaf.ffmpeg_lavfi(Some((1280, 720)), PixelFormat::Yuv420p, None),
+        vmaf.ffmpeg_lavfi(Some((1280, 720)), PixelFormat::Yuv420p, None, Some(file)),
         "[0:v]format=yuv420p,scale=1920:-1:flags=bicubic,setpts=PTS-STARTPTS[dis];\
          [1:v]format=yuv420p,scale=1920:-1:flags=bicubic,setpts=PTS-STARTPTS[ref];\
-         [dis][ref]libvmaf=n_threads=5:n_subsample=4"
+         [dis][ref]libvmaf=log_fmt=json:n_threads=5:n_subsample=4:log_path=vmaf_stats.json"
     );
 }
 
@@ -264,11 +285,13 @@ fn vmaf_lavfi_4k() {
         vmaf_args: vec!["n_threads=5".into(), "n_subsample=4".into()],
         vmaf_scale: VmafScale::Auto,
     };
+    let mut file = PathBuf::new();
+    file.set_file_name("vmaf_stats.json");
     assert_eq!(
-        vmaf.ffmpeg_lavfi(Some((3840, 2160)), PixelFormat::Yuv420p, None),
+        vmaf.ffmpeg_lavfi(Some((3840, 2160)), PixelFormat::Yuv420p, None, Some(file)),
         "[0:v]format=yuv420p,setpts=PTS-STARTPTS[dis];\
          [1:v]format=yuv420p,setpts=PTS-STARTPTS[ref];\
-         [dis][ref]libvmaf=n_threads=5:n_subsample=4:model=version=vmaf_4k_v0.6.1"
+         [dis][ref]libvmaf=log_fmt=json:n_threads=5:n_subsample=4:model=version=vmaf_4k_v0.6.1:log_path=vmaf_stats.json"
     );
 }
 
@@ -279,11 +302,13 @@ fn vmaf_lavfi_3k_upscale_to_4k() {
         vmaf_args: vec!["n_threads=5".into()],
         vmaf_scale: VmafScale::Auto,
     };
+    let mut file = PathBuf::new();
+    file.set_file_name("vmaf_stats.json");
     assert_eq!(
-        vmaf.ffmpeg_lavfi(Some((3008, 1692)), PixelFormat::Yuv420p, None),
+        vmaf.ffmpeg_lavfi(Some((3008, 1692)), PixelFormat::Yuv420p, None, Some(file)),
         "[0:v]format=yuv420p,scale=3840:-1:flags=bicubic,setpts=PTS-STARTPTS[dis];\
          [1:v]format=yuv420p,scale=3840:-1:flags=bicubic,setpts=PTS-STARTPTS[ref];\
-         [dis][ref]libvmaf=n_threads=5:model=version=vmaf_4k_v0.6.1"
+         [dis][ref]libvmaf=log_fmt=json:n_threads=5:model=version=vmaf_4k_v0.6.1:log_path=vmaf_stats.json"
     );
 }
 
@@ -298,11 +323,13 @@ fn vmaf_lavfi_small_width_custom_model() {
         ],
         vmaf_scale: VmafScale::Auto,
     };
+    let mut file = PathBuf::new();
+    file.set_file_name("vmaf_stats.json");
     assert_eq!(
-        vmaf.ffmpeg_lavfi(Some((1280, 720)), PixelFormat::Yuv420p, None),
+        vmaf.ffmpeg_lavfi(Some((1280, 720)), PixelFormat::Yuv420p, None, Some(file)),
         "[0:v]format=yuv420p,setpts=PTS-STARTPTS[dis];\
          [1:v]format=yuv420p,setpts=PTS-STARTPTS[ref];\
-         [dis][ref]libvmaf=model=version=foo:n_threads=5:n_subsample=4"
+         [dis][ref]libvmaf=log_fmt=json:model=version=foo:n_threads=5:n_subsample=4:log_path=vmaf_stats.json"
     );
 }
 
@@ -320,11 +347,13 @@ fn vmaf_lavfi_custom_model_and_width() {
             height: 720,
         },
     };
+    let mut file = PathBuf::new();
+    file.set_file_name("vmaf_stats.json");
     assert_eq!(
-        vmaf.ffmpeg_lavfi(Some((1280, 720)), PixelFormat::Yuv420p, None),
+        vmaf.ffmpeg_lavfi(Some((1280, 720)), PixelFormat::Yuv420p, None, Some(file)),
         "[0:v]format=yuv420p,scale=123:-1:flags=bicubic,setpts=PTS-STARTPTS[dis];\
          [1:v]format=yuv420p,scale=123:-1:flags=bicubic,setpts=PTS-STARTPTS[ref];\
-         [dis][ref]libvmaf=model=version=foo:n_threads=5:n_subsample=4"
+         [dis][ref]libvmaf=log_fmt=json:model=version=foo:n_threads=5:n_subsample=4:log_path=vmaf_stats.json"
     );
 }
 
@@ -334,10 +363,12 @@ fn vmaf_lavfi_1080p() {
         vmaf_args: vec!["n_threads=5".into(), "n_subsample=4".into()],
         vmaf_scale: VmafScale::Auto,
     };
+    let mut file = PathBuf::new();
+    file.set_file_name("vmaf_stats.json");
     assert_eq!(
-        vmaf.ffmpeg_lavfi(Some((1920, 1080)), PixelFormat::Yuv420p, None),
+        vmaf.ffmpeg_lavfi(Some((1920, 1080)), PixelFormat::Yuv420p, None, Some(file)),
         "[0:v]format=yuv420p,setpts=PTS-STARTPTS[dis];\
          [1:v]format=yuv420p,setpts=PTS-STARTPTS[ref];\
-         [dis][ref]libvmaf=n_threads=5:n_subsample=4"
+         [dis][ref]libvmaf=log_fmt=json:n_threads=5:n_subsample=4:log_path=vmaf_stats.json"
     );
 }

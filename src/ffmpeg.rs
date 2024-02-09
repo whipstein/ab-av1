@@ -6,6 +6,7 @@ use crate::{
     temporary::{self, TempKind},
 };
 use anyhow::Context;
+use infer::video;
 use std::{
     collections::HashSet,
     hash::{Hash, Hasher},
@@ -85,6 +86,11 @@ pub fn encode_sample(
 
     temporary::add(&dest, TempKind::Keepable);
 
+    let videotoolbox = match &*vcodec {
+        "h264_videotoolbox" | "hevc_videotoolbox" => true,
+        _ => false,
+    };
+
     let enc = Command::new("ffmpeg")
         .kill_on_drop(true)
         .arg("-y")
@@ -92,8 +98,8 @@ pub fn encode_sample(
         .arg2("-i", input)
         .arg2("-c:v", &*vcodec)
         .args(output_args.iter().map(|a| &**a))
-        .arg2(vcodec.crf_arg(), crf)
-        .arg2("-pix_fmt", pix_fmt.as_str())
+        .arg2_if(!videotoolbox, vcodec.crf_arg(), crf)
+        .arg2_if(!videotoolbox, "-pix_fmt", pix_fmt.as_str())
         .arg2_opt(vcodec.preset_arg(), preset)
         .arg2_opt("-vf", vfilter)
         .arg("-an")
@@ -146,6 +152,11 @@ pub fn encode(
         false => "0",
     };
 
+    let videotoolbox = match &*vcodec {
+        "h264_videotoolbox" | "hevc_videotoolbox" => true,
+        _ => false,
+    };
+
     let enc = Command::new("ffmpeg")
         .kill_on_drop(true)
         .args(input_args.iter().map(|a| &**a))
@@ -155,8 +166,8 @@ pub fn encode(
         .arg2("-c:v", "copy")
         .arg2("-c:v:0", &*vcodec)
         .args(output_args.iter().map(|a| &**a))
-        .arg2(vcodec.crf_arg(), crf)
-        .arg2("-pix_fmt", pix_fmt.as_str())
+        .arg2_if(!videotoolbox, vcodec.crf_arg(), crf)
+        .arg2_if(!videotoolbox, "-pix_fmt", pix_fmt.as_str())
         .arg2_opt(vcodec.preset_arg(), preset)
         .arg2_opt("-vf", vfilter)
         .arg2("-c:s", "copy")

@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context};
 use std::{fmt, fs::File, io::Read, path::Path, time::Duration};
 
 pub struct Ffprobe {
+    pub path: Box<Path>,
     /// Duration of video.
     pub duration: Result<Duration, ProbeError>,
     /// The video has audio stream(s).
@@ -46,6 +47,7 @@ pub fn probe(input: &Path) -> Ffprobe {
         Ok(p) => p,
         Err(err) => {
             return Ffprobe {
+                path: input.into(),
                 duration: Err(ProbeError(format!("ffprobe: {err}"))),
                 fps: Err(ProbeError(format!("ffprobe: {err}"))),
                 has_audio: true,
@@ -87,6 +89,7 @@ pub fn probe(input: &Path) -> Ffprobe {
         .find_map(|s| s.pix_fmt);
 
     Ffprobe {
+        path: input.into(),
         duration: duration.map_err(ProbeError::from),
         fps: fps.map_err(ProbeError::from),
         has_audio,

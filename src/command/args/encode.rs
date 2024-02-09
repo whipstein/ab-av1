@@ -8,7 +8,7 @@ use clap::Parser;
 use std::{
     collections::HashMap,
     fmt::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -499,154 +499,160 @@ fn try_parse_fps_vfilter(vfilter: &str) -> Option<f64> {
     }
 }
 
-#[test]
-fn test_try_parse_fps_vfilter() {
-    let fps = try_parse_fps_vfilter("scale=1280:-1, fps=24, transpose=1").unwrap();
-    assert!((fps - 24.0).abs() < f64::EPSILON, "{fps:?}");
+mod test {
+    use super::*;
 
-    let fps = try_parse_fps_vfilter("scale=1280:-1, fps=ntsc, transpose=1").unwrap();
-    assert!((fps - 30000.0 / 1001.0).abs() < f64::EPSILON, "{fps:?}");
-}
+    #[test]
+    fn test_try_parse_fps_vfilter() {
+        let fps = try_parse_fps_vfilter("scale=1280:-1, fps=24, transpose=1").unwrap();
+        assert!((fps - 24.0).abs() < f64::EPSILON, "{fps:?}");
 
-#[test]
-fn frame_interval_from_str() {
-    use std::str::FromStr;
-    let from_300 = KeyInterval::from_str("300").unwrap();
-    assert_eq!(from_300, KeyInterval::Frames(300));
-}
+        let fps = try_parse_fps_vfilter("scale=1280:-1, fps=ntsc, transpose=1").unwrap();
+        assert!((fps - 30000.0 / 1001.0).abs() < f64::EPSILON, "{fps:?}");
+    }
 
-#[test]
-fn duration_interval_from_str() {
-    use std::{str::FromStr, time::Duration};
-    let from_10s = KeyInterval::from_str("10s").unwrap();
-    assert_eq!(from_10s, KeyInterval::Duration(Duration::from_secs(10)));
-}
+    #[test]
+    fn frame_interval_from_str() {
+        use std::str::FromStr;
+        let from_300 = KeyInterval::from_str("300").unwrap();
+        assert_eq!(from_300, KeyInterval::Frames(300));
+    }
 
-/// Should use keyint & scd defaults for >3m inputs.
-#[test]
-fn svtav1_to_ffmpeg_args_default_over_3m() {
-    let enc = Encode {
-        encoder: Encoder("libsvtav1".into()),
-        input: "vid.mp4".into(),
-        vfilter: Some("scale=320:-1,fps=film".into()),
-        preset: None,
-        pix_format: None,
-        keyint: None,
-        scd: None,
-        svt_args: vec!["film-grain=30".into()],
-        enc_args: <_>::default(),
-        enc_input_args: <_>::default(),
-    };
+    #[test]
+    fn duration_interval_from_str() {
+        use std::{str::FromStr, time::Duration};
+        let from_10s = KeyInterval::from_str("10s").unwrap();
+        assert_eq!(from_10s, KeyInterval::Duration(Duration::from_secs(10)));
+    }
 
-    let probe = Ffprobe {
-        duration: Ok(Duration::from_secs(300)),
-        has_audio: true,
-        max_audio_channels: None,
-        fps: Ok(30.0),
-        resolution: Some((1280, 720)),
-        is_image: false,
-        pix_fmt: None,
-    };
+    /// Should use keyint & scd defaults for >3m inputs.
+    #[test]
+    fn svtav1_to_ffmpeg_args_default_over_3m() {
+        let enc = Encode {
+            encoder: Encoder("libsvtav1".into()),
+            input: "vid.mp4".into(),
+            vfilter: Some("scale=320:-1,fps=film".into()),
+            preset: None,
+            pix_format: None,
+            keyint: None,
+            scd: None,
+            svt_args: vec!["film-grain=30".into()],
+            enc_args: <_>::default(),
+            enc_input_args: <_>::default(),
+        };
 
-    let FfmpegEncodeArgs {
-        input,
-        vcodec,
-        vfilter,
-        pix_fmt,
-        crf,
-        preset,
-        output_args,
-        input_args,
-        video_only,
-    } = enc
-        .to_ffmpeg_args("libsvtav1".into(), 32.0, &probe)
-        .expect("to_ffmpeg_args");
+        let probe = Ffprobe {
+            path: Path::new("").into(),
+            duration: Ok(Duration::from_secs(300)),
+            has_audio: true,
+            max_audio_channels: None,
+            fps: Ok(30.0),
+            resolution: Some((1280, 720)),
+            is_image: false,
+            pix_fmt: None,
+        };
 
-    assert_eq!(&*vcodec, "libsvtav1");
-    assert_eq!(input, enc.input);
-    assert_eq!(vfilter, Some("scale=320:-1,fps=film"));
-    assert_eq!(crf, 32.0);
-    assert_eq!(preset, Some("8".into()));
-    assert_eq!(pix_fmt, PixelFormat::Yuv420p10le);
-    assert!(!video_only);
+        let FfmpegEncodeArgs {
+            input,
+            vcodec,
+            vfilter,
+            pix_fmt,
+            crf,
+            preset,
+            output_args,
+            input_args,
+            video_only,
+        } = enc
+            .to_ffmpeg_args("libsvtav1".into(), 32.0, &probe)
+            .expect("to_ffmpeg_args");
 
-    assert!(
-        output_args
-            .windows(2)
-            .any(|w| w[0].as_str() == "-g" && w[1].as_str() == "240"),
-        "expected -g in {output_args:?}"
-    );
-    let svtargs_idx = output_args
-        .iter()
-        .position(|a| a.as_str() == "-svtav1-params")
-        .expect("missing -svtav1-params");
-    let svtargs = output_args
-        .get(svtargs_idx + 1)
-        .expect("missing -svtav1-params value")
-        .as_str();
-    assert_eq!(svtargs, "scd=1:film-grain=30");
-    assert!(input_args.is_empty());
-}
+        assert_eq!(&*vcodec, "libsvtav1");
+        assert_eq!(input, enc.input);
+        assert_eq!(vfilter, Some("scale=320:-1,fps=film"));
+        assert_eq!(crf, 32.0);
+        assert_eq!(preset, Some("8".into()));
+        assert_eq!(pix_fmt, PixelFormat::Yuv420p10le);
+        assert!(!video_only);
 
-#[test]
-fn svtav1_to_ffmpeg_args_default_under_3m() {
-    let enc = Encode {
-        encoder: Encoder("libsvtav1".into()),
-        input: "vid.mp4".into(),
-        vfilter: None,
-        preset: Some(Preset::Number(7)),
-        pix_format: Some(PixelFormat::Yuv420p),
-        keyint: None,
-        scd: None,
-        svt_args: vec![],
-        enc_args: <_>::default(),
-        enc_input_args: <_>::default(),
-    };
+        assert!(
+            output_args
+                .windows(2)
+                .any(|w| w[0].as_str() == "-g" && w[1].as_str() == "240"),
+            "expected -g in {output_args:?}"
+        );
+        let svtargs_idx = output_args
+            .iter()
+            .position(|a| a.as_str() == "-svtav1-params")
+            .expect("missing -svtav1-params");
+        let svtargs = output_args
+            .get(svtargs_idx + 1)
+            .expect("missing -svtav1-params value")
+            .as_str();
+        assert_eq!(svtargs, "scd=1:film-grain=30");
+        assert!(input_args.is_empty());
+    }
 
-    let probe = Ffprobe {
-        duration: Ok(Duration::from_secs(179)),
-        has_audio: true,
-        max_audio_channels: None,
-        fps: Ok(24.0),
-        resolution: Some((1280, 720)),
-        is_image: false,
-        pix_fmt: None,
-    };
+    #[test]
+    fn svtav1_to_ffmpeg_args_default_under_3m() {
+        let enc = Encode {
+            encoder: Encoder("libsvtav1".into()),
+            input: "vid.mp4".into(),
+            vfilter: None,
+            preset: Some(Preset::Number(7)),
+            pix_format: Some(PixelFormat::Yuv420p),
+            keyint: None,
+            scd: None,
+            svt_args: vec![],
+            enc_args: <_>::default(),
+            enc_input_args: <_>::default(),
+        };
 
-    let FfmpegEncodeArgs {
-        input,
-        vcodec,
-        vfilter,
-        pix_fmt,
-        crf,
-        preset,
-        output_args,
-        input_args,
-        video_only,
-    } = enc
-        .to_ffmpeg_args("libsvtav1".into(), 32.0, &probe)
-        .expect("to_ffmpeg_args");
+        let probe = Ffprobe {
+            path: Path::new("").into(),
+            duration: Ok(Duration::from_secs(179)),
+            has_audio: true,
+            max_audio_channels: None,
+            fps: Ok(24.0),
+            resolution: Some((1280, 720)),
+            is_image: false,
+            pix_fmt: None,
+        };
 
-    assert_eq!(&*vcodec, "libsvtav1");
-    assert_eq!(input, enc.input);
-    assert_eq!(vfilter, None);
-    assert_eq!(crf, 32.0);
-    assert_eq!(preset, Some("7".into()));
-    assert_eq!(pix_fmt, PixelFormat::Yuv420p);
-    assert!(!video_only);
+        let FfmpegEncodeArgs {
+            input,
+            vcodec,
+            vfilter,
+            pix_fmt,
+            crf,
+            preset,
+            output_args,
+            input_args,
+            video_only,
+        } = enc
+            .to_ffmpeg_args("libsvtav1".into(), 32.0, &probe)
+            .expect("to_ffmpeg_args");
 
-    assert!(
-        !output_args.iter().any(|a| a.as_str() == "-g"),
-        "unexpected -g in {output_args:?}"
-    );
-    let svtargs_idx = output_args
-        .iter()
-        .position(|a| a.as_str() == "-svtav1-params")
-        .expect("missing -svtav1-params");
-    let svtargs = output_args
-        .get(svtargs_idx + 1)
-        .expect("missing -svtav1-params value")
-        .as_str();
-    assert_eq!(svtargs, "scd=0");
-    assert!(input_args.is_empty());
+        assert_eq!(&*vcodec, "libsvtav1");
+        assert_eq!(input, enc.input);
+        assert_eq!(vfilter, None);
+        assert_eq!(crf, 32.0);
+        assert_eq!(preset, Some("7".into()));
+        assert_eq!(pix_fmt, PixelFormat::Yuv420p);
+        assert!(!video_only);
+
+        assert!(
+            !output_args.iter().any(|a| a.as_str() == "-g"),
+            "unexpected -g in {output_args:?}"
+        );
+        let svtargs_idx = output_args
+            .iter()
+            .position(|a| a.as_str() == "-svtav1-params")
+            .expect("missing -svtav1-params");
+        let svtargs = output_args
+            .get(svtargs_idx + 1)
+            .expect("missing -svtav1-params value")
+            .as_str();
+        assert_eq!(svtargs, "scd=0");
+        assert!(input_args.is_empty());
+    }
 }

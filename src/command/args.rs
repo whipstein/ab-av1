@@ -1,8 +1,10 @@
 //! Shared argument logic.
 mod encode;
+mod ssim;
 mod vmaf;
 
 pub use encode::*;
+pub use ssim::*;
 pub use vmaf::*;
 
 use crate::{command::encode::default_output_ext, ffprobe::Ffprobe};

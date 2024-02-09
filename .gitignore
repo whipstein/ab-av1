@@ -1,3 +1,8 @@
 /target
 /aur
 *.log
+/test
+.DS_Store
+/.vscode
+*.sh
+*.json

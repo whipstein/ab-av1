@@ -72,7 +72,7 @@ pub async fn auto_encode(Args { mut search, encode }: Args) -> anyhow::Result<()
                         .progress_chars(PROGRESS_CHARS),
                 );
                 let mut vmaf = style(last.enc.vmaf);
-                if last.enc.vmaf < search.min_vmaf {
+                if last.enc.vmaf < search.vmaf_tgt {
                     vmaf = vmaf.red();
                 }
                 let mut percent = style!("{:.0}%", last.enc.encode_percent);

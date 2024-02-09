@@ -185,7 +185,7 @@ fn parse_ffmpeg_progress_chunk() {
         Some(FfmpegOut::Progress {
             frame: 288,
             fps: 94.0,
-            time: Duration::new(60 * 60 + 23 * 60 + 12, 340_000_000),
+            time: Duration::new(1 * 60 * 60 + 23 * 60 + 12, 340_000_000),
         })
     );
 }
@@ -198,7 +198,7 @@ fn parse_ffmpeg_progress_line() {
         Some(FfmpegOut::Progress {
             frame: 161,
             fps: 73.0,
-            time: Duration::new(6, 710_000_000),
+            time: Duration::new(0 * 60 * 60 + 0 * 60 + 6, 710_000_000),
         })
     );
 }

@@ -38,7 +38,11 @@ pub struct Args {
 
     /// Desired min VMAF score to deliver.
     #[arg(long, default_value_t = 95.0)]
-    pub min_vmaf: f32,
+    pub vmaf_tgt: f32,
+
+    /// Desired min VMAF frame score to deliver.
+    #[arg(long, default_value_t = 88.0)]
+    pub vmaf_min_tgt: f32,
 
     /// Maximum desired encoded size percentage of the input size.
     #[arg(long, default_value_t = 80.0)]
@@ -54,7 +58,7 @@ pub struct Args {
     #[arg(long)]
     pub max_crf: Option<f32>,
 
-    /// Keep searching until a crf is found no more than min_vmaf+0.05 or all
+    /// Keep searching until a crf is found no more than vmaf_tgt+0.05 or all
     /// possibilities have been attempted.
     ///
     /// By default the "higher vmaf tolerance" increases with each attempt (0.1, 0.2, 0.4 etc...).
@@ -117,7 +121,8 @@ pub async fn crf_search(mut args: Args) -> anyhow::Result<()> {
 pub async fn run(
     Args {
         args,
-        min_vmaf,
+        vmaf_tgt,
+        vmaf_min_tgt,
         max_encoded_percent,
         min_crf,
         max_crf,
@@ -194,9 +199,9 @@ pub async fn run(
         crf_attempts.push(sample.clone());
         let sample_small_enough = sample.enc.encode_percent <= *max_encoded_percent as _;
 
-        if sample.enc.vmaf > *min_vmaf {
+        if sample.enc.vmaf > *vmaf_tgt && sample.enc.vmaf_min > *vmaf_min_tgt {
             // good
-            if sample_small_enough && sample.enc.vmaf < min_vmaf + higher_tolerance {
+            if sample_small_enough && sample.enc.vmaf < vmaf_tgt + higher_tolerance {
                 return Ok(sample);
             }
             let u_bound = crf_attempts
@@ -210,7 +215,7 @@ pub async fn run(
                     return Ok(sample);
                 }
                 Some(upper) => {
-                    q = vmaf_lerp_q(*min_vmaf, upper, &sample);
+                    q = vmaf_lerp_q(*vmaf_tgt, upper, &sample);
                 }
                 None if sample.q == max_q => {
                     ensure_or_no_good_crf!(sample_small_enough, sample);
@@ -224,7 +229,14 @@ pub async fn run(
         } else {
             // not good enough
             if !sample_small_enough || sample.q == min_q {
-                sample.print_attempt(&bar, *min_vmaf, *max_encoded_percent, *quiet, from_cache);
+                sample.print_attempt(
+                    &bar,
+                    *vmaf_tgt,
+                    *vmaf_min_tgt,
+                    *max_encoded_percent,
+                    *quiet,
+                    from_cache,
+                );
                 ensure_or_no_good_crf!(false, sample);
             }
 
@@ -235,13 +247,20 @@ pub async fn run(
 
             match l_bound {
                 Some(lower) if lower.q + 1 == sample.q => {
-                    sample.print_attempt(&bar, *min_vmaf, *max_encoded_percent, *quiet, from_cache);
+                    sample.print_attempt(
+                        &bar,
+                        *vmaf_tgt,
+                        *vmaf_min_tgt,
+                        *max_encoded_percent,
+                        *quiet,
+                        from_cache,
+                    );
                     let lower_small_enough = lower.enc.encode_percent <= *max_encoded_percent as _;
                     ensure_or_no_good_crf!(lower_small_enough, sample);
                     return Ok(lower.clone());
                 }
                 Some(lower) => {
-                    q = vmaf_lerp_q(*min_vmaf, &sample, lower);
+                    q = vmaf_lerp_q(*vmaf_tgt, &sample, lower);
                 }
                 None if run == 1 && sample.q > min_q + 1 => {
                     q = (min_q + sample.q) / 2;
@@ -249,7 +268,14 @@ pub async fn run(
                 None => q = min_q,
             };
         }
-        sample.print_attempt(&bar, *min_vmaf, *max_encoded_percent, *quiet, from_cache);
+        sample.print_attempt(
+            &bar,
+            *vmaf_tgt,
+            *vmaf_min_tgt,
+            *max_encoded_percent,
+            *quiet,
+            from_cache,
+        );
     }
     unreachable!();
 }
@@ -269,7 +295,8 @@ impl Sample {
     fn print_attempt(
         &self,
         bar: &ProgressBar,
-        min_vmaf: f32,
+        vmaf_tgt: f32,
+        vmaf_min_tgt: f32,
         max_encoded_percent: f32,
         quiet: bool,
         from_cache: bool,
@@ -281,6 +308,7 @@ impl Sample {
         let mut crf = style(TerseF32(self.crf()));
         let vmaf_label = style("VMAF").dim();
         let mut vmaf = style(self.enc.vmaf);
+        let mut vmaf_min = style(self.enc.vmaf_min);
         let mut percent = style!("{:.0}%", self.enc.encode_percent);
         let open = style("(").dim();
         let close = style(")").dim();
@@ -289,9 +317,13 @@ impl Sample {
             false => style(""),
         };
 
-        if self.enc.vmaf < min_vmaf {
+        if self.enc.vmaf < vmaf_tgt {
             crf = crf.red().bright();
             vmaf = vmaf.red().bright();
+        }
+        if self.enc.vmaf_min < vmaf_min_tgt {
+            crf = crf.red().bright();
+            vmaf_min = vmaf_min.red().bright();
         }
         if self.enc.encode_percent > max_encoded_percent as _ {
             crf = crf.red().bright();
@@ -299,7 +331,7 @@ impl Sample {
         }
 
         let msg =
-            format!("{crf_label} {crf} {vmaf_label} {vmaf:.2} {open}{percent}{close}{cache_msg}");
+            format!("{crf_label} {crf} {vmaf_label} {vmaf:.2}/{vmaf_min:.2} {open}{percent}{close}{cache_msg}");
         if io::stderr().is_terminal() {
             bar.println(msg);
         } else {
@@ -320,6 +352,7 @@ impl StdoutFormat {
                 let crf = style(TerseF32(sample.crf())).bold().green();
                 let enc = &sample.enc;
                 let vmaf = style(enc.vmaf).bold().green();
+                let vmaf_min = style(enc.vmaf_min).bold().green();
                 let size = style(HumanBytes(enc.predicted_encode_size)).bold().green();
                 let percent = style!("{}%", enc.encode_percent.round()).bold().green();
                 let time = style(HumanDuration(enc.predicted_encode_time)).bold();
@@ -328,7 +361,7 @@ impl StdoutFormat {
                     false => "video stream",
                 };
                 println!(
-                    "crf {crf} VMAF {vmaf:.2} predicted {enc_description} size {size} ({percent}) taking {time}"
+                    "crf {crf} VMAF {vmaf:.2}/{vmaf_min:.2} predicted {enc_description} size {size} ({percent}) taking {time}"
                 );
             }
         }
@@ -336,7 +369,7 @@ impl StdoutFormat {
 }
 
 /// Produce a q value between given samples using vmaf score linear interpolation
-/// so the output q value should produce the `min_vmaf`.
+/// so the output q value should produce the `vmaf_tgt`.
 ///
 /// Note: `worse_q` will be a numerically higher q value (worse quality),
 ///       `better_q` a numerically lower q value (better quality).
@@ -346,16 +379,16 @@ impl StdoutFormat {
 /// though it seems to work better than a binary search.
 /// Perhaps a better approximation of a general crf->vmaf model could be found.
 /// This would be helpful particularly for small crf-increments.
-fn vmaf_lerp_q(min_vmaf: f32, worse_q: &Sample, better_q: &Sample) -> u64 {
+fn vmaf_lerp_q(vmaf_tgt: f32, worse_q: &Sample, better_q: &Sample) -> u64 {
     assert!(
-        worse_q.enc.vmaf <= min_vmaf
+        worse_q.enc.vmaf <= vmaf_tgt
             && worse_q.enc.vmaf < better_q.enc.vmaf
             && worse_q.q > better_q.q,
-        "invalid vmaf_lerp_crf usage: ({min_vmaf}, {worse_q:?}, {better_q:?})"
+        "invalid vmaf_lerp_crf usage: ({vmaf_tgt}, {worse_q:?}, {better_q:?})"
     );
 
     let vmaf_diff = better_q.enc.vmaf - worse_q.enc.vmaf;
-    let vmaf_factor = (min_vmaf - worse_q.enc.vmaf) / vmaf_diff;
+    let vmaf_factor = (vmaf_tgt - worse_q.enc.vmaf) / vmaf_diff;
 
     let q_diff = worse_q.q - better_q.q;
     let lerp = (worse_q.q as f32 - q_diff as f32 * vmaf_factor).round() as u64;

@@ -1,31 +1,32 @@
-pub mod parser;
+mod parser;
 
-use crate::command::vmaf::parser::{
-    VmafData, VmafFrameData, VmafMetrics, VmafPooledMetrics, VmafSummaryData,
-};
+use crate::command::ssim::parser::{SsimData, SsimFrameData};
 use crate::{
     command::{
         args::{self, PixelFormat},
+        ssim::parser::parse_ssim_stdout_line,
         PROGRESS_CHARS,
     },
-    ffprobe, plot,
+    ffprobe,
     process::FfmpegOut,
-    stats::Stats,
-    vmaf,
-    vmaf::VmafOut,
+    ssim,
+    ssim::SsimOut,
 };
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::{path::PathBuf, time::Duration};
+use nom_bufreader::async_bufreader::BufReader;
+use nom_bufreader::{Error, Parse};
+use std::io::BufRead;
+use std::{fs, fs::File, path::PathBuf, time::Duration};
 use tokio_stream::StreamExt;
 
-/// Full VMAF score calculation, distorted file vs reference file.
+use self::parser::parse_input;
+
+/// Full SSIM score calculation, distorted file vs reference file.
 /// Works with videos and images.
 ///
-/// * Auto sets model version (4k or 1k) according to resolution.
-/// * Auto sets `n_threads` to system threads.
 /// * Auto upscales lower resolution videos to the model.
-/// * Converts distorted & reference to appropriate format yuv streams before passing to vmaf.
+/// * Converts distorted & reference to appropriate format yuv streams before passing to ssim.
 #[derive(Parser)]
 #[clap(verbatim_doc_comment)]
 #[group(skip)]
@@ -44,15 +45,15 @@ pub struct Args {
     pub distorted: PathBuf,
 
     #[clap(flatten)]
-    pub vmaf: args::Vmaf,
+    pub ssim: args::Ssim,
 }
 
-pub async fn vmaf(
+pub async fn ssim<'a>(
     Args {
         reference,
         reference_vfilter,
         distorted,
-        vmaf,
+        ssim,
     }: Args,
 ) -> anyhow::Result<()> {
     let bar = ProgressBar::new(1).with_style(
@@ -61,7 +62,7 @@ pub async fn vmaf(
             .progress_chars(PROGRESS_CHARS)
     );
     bar.enable_steady_tick(Duration::from_millis(100));
-    bar.set_message("vmaf running, ");
+    bar.set_message("ssim running, ");
 
     let dprobe = ffprobe::probe(&distorted);
     let dpix_fmt = dprobe.pixel_format().unwrap_or(PixelFormat::Yuv444p10le);
@@ -72,55 +73,41 @@ pub async fn vmaf(
         bar.set_length(nframes);
     }
 
-    let mut logfile_name = distorted.clone();
-    logfile_name.set_extension("json");
-    let mut vmaf = vmaf::run(
-        &rprobe,
-        &dprobe,
-        &vmaf.ffmpeg_lavfi(
+    let mut ssim = ssim::run(
+        &reference,
+        &distorted,
+        &ssim.ffmpeg_lavfi(
             dprobe.resolution,
             dpix_fmt.max(rpix_fmt),
             reference_vfilter.as_deref(),
-            Some(logfile_name.clone()),
         ),
     )?;
-    // let mut vmaf_score = -1.0;
-    while let Some(vmaf) = vmaf.next().await {
-        match vmaf {
-            VmafOut::Done(score) => {
-                // vmaf_score = score;
+    let mut ssim_score = -1.0;
+    while let Some(ssim) = ssim.next().await {
+        match ssim {
+            SsimOut::Done(score) => {
+                ssim_score = score;
                 break;
             }
-            VmafOut::Progress(FfmpegOut::Progress { frame, fps, .. }) => {
+            SsimOut::Progress(FfmpegOut::Progress { frame, fps, .. }) => {
                 if fps > 0.0 {
-                    bar.set_message(format!("vmaf {fps} fps, "));
+                    bar.set_message(format!("ssim {fps} fps, "));
                 }
                 if nframes.is_ok() {
                     bar.set_position(frame);
                 }
             }
-            VmafOut::Progress(FfmpegOut::StreamSizes { .. }) => {}
-            VmafOut::Err(e) => return Err(e),
+            SsimOut::Progress(FfmpegOut::StreamSizes { .. }) => {}
+            SsimOut::Err(e) => return Err(e),
         }
     }
-    std::thread::sleep(std::time::Duration::new(1, 0));
     bar.finish();
 
-    let vmaf_score = VmafData::from_file(logfile_name);
-    let vmaf_stats = Stats::calc_stats(&vmaf_score.to_vec());
+    let byte_lines = fs::read("ssim_stats.log").unwrap();
+    let lines = std::str::from_utf8(&byte_lines).unwrap();
+    let lines = parse_input(lines.as_bytes());
+    let data = SsimData::from_vec(&lines);
 
-    println!("{vmaf_score}");
-    println!("{vmaf_stats}");
-
-    // let pts = vmaf_score.gen_pts();
-    // let mut graph_name = distorted.clone();
-    // graph_name.set_extension("png");
-    // plot::plot(
-    //     pts,
-    //     &vmaf_stats.eff_min,
-    //     &vmaf_stats.harmonic_mean,
-    //     graph_name,
-    // );
-
+    println!("{}", data);
     Ok(())
 }

@@ -1,12 +1,18 @@
+#![allow(unused)]
 mod command;
 mod console_ext;
 mod ffmpeg;
 mod ffprobe;
 mod float;
+mod plot;
 mod process;
 mod sample;
+mod ssim;
+mod stats;
 mod temporary;
 mod vmaf;
+
+extern crate nom;
 
 use anyhow::anyhow;
 use clap::Parser;
@@ -22,6 +28,7 @@ const SAMPLE_SIZE: Duration = Duration::from_secs(SAMPLE_SIZE_S);
 enum Command {
     SampleEncode(command::sample_encode::Args),
     Vmaf(command::vmaf::Args),
+    Ssim(command::ssim::Args),
     Encode(command::encode::Args),
     CrfSearch(command::crf_search::Args),
     AutoEncode(command::auto_encode::Args),
@@ -39,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let command = local.run_until(match action {
         Command::SampleEncode(args) => command::sample_encode(args).boxed_local(),
         Command::Vmaf(args) => command::vmaf(args).boxed_local(),
+        Command::Ssim(args) => command::ssim(args).boxed_local(),
         Command::Encode(args) => command::encode(args).boxed_local(),
         Command::CrfSearch(args) => command::crf_search(args).boxed_local(),
         Command::AutoEncode(args) => command::auto_encode(args).boxed_local(),

@@ -3,13 +3,17 @@ mod cache;
 use crate::{
     command::{
         args::{self, PixelFormat},
+        vmaf::parser::{VmafData, VmafFrameData, VmafMetrics, VmafPooledMetrics, VmafSummaryData},
         SmallDuration, PROGRESS_CHARS,
     },
     console_ext::style,
     ffmpeg::{self, FfmpegEncodeArgs},
     ffprobe::{self, Ffprobe},
+    plot,
     process::FfmpegOut,
-    sample, temporary, vmaf,
+    sample,
+    stats::Stats,
+    temporary, vmaf,
     vmaf::VmafOut,
     SAMPLE_SIZE, SAMPLE_SIZE_S,
 };
@@ -202,21 +206,25 @@ pub async fn run(
                         }
                     }
                 }
+                let sample_probe = ffprobe::probe(&sample);
                 let encode_time = b.elapsed();
                 let encoded_size = fs::metadata(&encoded_sample).await?.len();
                 let encoded_probe = ffprobe::probe(&encoded_sample);
 
                 // calculate vmaf
                 bar.set_message("vmaf running,");
+                let mut logfile_name = encoded_sample.clone();
+                logfile_name.set_extension("json");
                 let mut vmaf = vmaf::run(
-                    &sample,
-                    &encoded_sample,
+                    &sample_probe,
+                    &encoded_probe,
                     &vmaf.ffmpeg_lavfi(
                         encoded_probe.resolution,
                         enc_args
                             .pix_fmt
                             .max(input_pixel_format.unwrap_or(PixelFormat::Yuv444p10le)),
                         args.vfilter.as_deref(),
+                        Some(logfile_name.clone()),
                     ),
                 )?;
                 let mut vmaf_score = -1.0;
@@ -242,17 +250,33 @@ pub async fn run(
                     }
                 }
 
+                std::thread::sleep(std::time::Duration::new(1, 0));
+                let vmaf_results = VmafData::from_file(logfile_name);
+                let vmaf_stats = Stats::calc_stats(&vmaf_results.to_vec());
                 bar.println(
                     style!(
-                        "- Sample {sample_n} ({:.0}%) vmaf {vmaf_score:.2}",
-                        100.0 * encoded_size as f32 / sample_size as f32
+                        "- Sample {sample_n} ({:.0}%) vmaf {vmaf_score:.2} harmean {:.2} min {:.2}",
+                        100.0 * encoded_size as f32 / sample_size as f32,
+                        vmaf_results.pooled_metrics.vmaf.harmonic_mean,
+                        vmaf_stats.eff_min,
                     )
                     .dim()
                     .to_string(),
                 );
+                // let pts = vmaf_results.gen_pts();
+                // let mut graph_name = encoded_sample.clone();
+                // graph_name.set_extension("png");
+                // plot::plot(
+                //     pts,
+                //     &vmaf_stats.eff_min,
+                //     &vmaf_stats.harmonic_mean,
+                //     graph_name,
+                // );
 
                 let result = EncodeResult {
-                    vmaf_score,
+                    // vmaf_score,
+                    vmaf_score: vmaf_results.pooled_metrics.vmaf.harmonic_mean,
+                    vmaf_min: vmaf_stats.eff_min,
                     sample_size,
                     encoded_size,
                     encode_time,
@@ -284,6 +308,7 @@ pub async fn run(
 
     let output = Output {
         vmaf: results.mean_vmaf(),
+        vmaf_min: results.min_vmaf(),
         // Using file size * encode_percent can over-estimate. However, if it ends up less
         // than the duration estimation it may turn out to be more accurate.
         predicted_encode_size: results
@@ -346,6 +371,7 @@ pub struct EncodeResult {
     sample_size: u64,
     encoded_size: u64,
     vmaf_score: f32,
+    vmaf_min: f32,
     encode_time: Duration,
     /// Duration of the sample.
     ///
@@ -359,6 +385,8 @@ trait EncodeResults {
     fn encoded_percent_size(&self) -> f64;
 
     fn mean_vmaf(&self) -> f32;
+
+    fn min_vmaf(&self) -> f32;
 
     /// Return estimated encoded **video stream** size by multiplying sample size by duration.
     fn estimate_encode_size_by_duration(
@@ -384,6 +412,13 @@ impl EncodeResults for Vec<EncodeResult> {
             return 0.0;
         }
         self.iter().map(|r| r.vmaf_score).sum::<f32>() / self.len() as f32
+    }
+
+    fn min_vmaf(&self) -> f32 {
+        if self.is_empty() {
+            return 0.0;
+        }
+        self.iter().map(|r| r.vmaf_min).sum::<f32>() / self.len() as f32
     }
 
     fn estimate_encode_size_by_duration(
@@ -499,6 +534,8 @@ impl StdoutFormat {
 pub struct Output {
     /// Sample mean VMAF score.
     pub vmaf: f32,
+    /// Sample min VMAF score.
+    pub vmaf_min: f32,
     /// Estimated full encoded **video stream** size.
     ///
     /// Encoded sample size multiplied by duration.
