@@ -1,5 +1,5 @@
 //! ffprobe logic
-use crate::command::encoders::PixelFormat;
+use crate::command::encoders::VTPixelFormat;
 use anyhow::{anyhow, Context};
 use std::{fmt, fs::File, io::Read, path::Path, time::Duration};
 
@@ -18,9 +18,9 @@ pub struct Ffprobe {
 }
 
 impl Ffprobe {
-    pub fn pixel_format(&self) -> Option<PixelFormat> {
+    pub fn pixel_format(&self) -> Option<VTPixelFormat> {
         let pf = self.pix_fmt.as_deref()?;
-        PixelFormat::try_from(pf).ok()
+        VTPixelFormat::try_from(pf).ok()
     }
 
     pub fn nframes(&self) -> Result<u64, ProbeError> {

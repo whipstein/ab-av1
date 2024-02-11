@@ -1,6 +1,9 @@
 //! ffmpeg encoding logic
 use crate::{
-    command::encoders::{svtav1::SvtEncoder, Encoder, PixelFormat, Preset},
+    // command::encoders::svtav1::SvtEncoder,
+    command::encoders::{
+        videotoolbox::VideotoolboxEncoder, Encoder, PixelFormat, Preset, VTPixelFormat,
+    },
     ffprobe::Ffprobe,
     float::TerseF32,
     process::{CommandExt, FfmpegOut},
@@ -22,10 +25,11 @@ use tokio_stream::Stream;
 pub struct FfmpegEncodeArgs {
     pub input: Arc<PathBuf>,
     pub output: PathBuf,
-    pub enc: Arc<SvtEncoder>,
+    // pub enc: Arc<SvtEncoder>,
+    pub enc: Arc<VideotoolboxEncoder>,
     pub vcodec: Arc<str>,
     pub vfilter: Option<String>,
-    pub pix_fmt: PixelFormat,
+    pub pix_fmt: VTPixelFormat,
     pub output_args: Vec<Arc<String>>,
     pub input_args: Vec<Arc<String>>,
     pub video_only: bool,
@@ -55,45 +59,33 @@ impl FfmpegEncodeArgs {
         self.input_args.hash(state);
     }
 
-    pub fn from_enc(
+    pub fn from_encoder(
         input: Arc<PathBuf>,
+        output: Option<PathBuf>,
         dir: Option<PathBuf>,
-        enc: Arc<SvtEncoder>,
+        // enc: Arc<SvtEncoder>,
+        enc: Arc<VideotoolboxEncoder>,
         probe: &Ffprobe,
         sample: bool,
     ) -> anyhow::Result<Self> {
-        let svtav1 = enc.encoder.as_str() == "libsvtav1";
+        let vt = enc.encoder.as_str() == "hevc_videotoolbox";
         ensure!(
-            svtav1 || enc.svt_args.is_empty(),
-            "--svt may only be used with svt-av1"
+            vt || enc.vt_args.is_empty(),
+            "--vt may only be used with hevc_videotoolbox"
         );
-
-        let preset = match &enc.preset {
-            Some(Preset::Number(n)) => Some(n.to_string().into()),
-            Some(Preset::Name(n)) => Some(n.clone()),
-            None if svtav1 => Some("8".into()),
-            None => None,
-        };
 
         let keyint = enc.keyint(probe)?;
 
-        let mut svtav1_params = vec![];
-        if svtav1 {
-            let scd = match (enc.scd, enc.keyint, keyint) {
-                (Some(true), ..) | (_, None, Some(_)) => 1,
-                _ => 0,
-            };
-            svtav1_params.push(format!("scd={scd}"));
-            svtav1_params.extend(enc.svt_args.iter().map(|a| a.to_string()));
-        }
+        let mut vt_params = vec![];
+        vt_params.extend(enc.vt_args.iter().map(|a| a.to_string()));
 
         let mut args: Vec<Arc<String>> = enc
             .enc_args
             .iter()
             .flat_map(|arg| {
                 if let Some((opt, val)) = arg.split_once('=') {
-                    if opt == "svtav1-params" {
-                        svtav1_params.push(arg.clone());
+                    if opt == "vt-params" {
+                        vt_params.push(arg.clone());
                         vec![].into_iter()
                     } else {
                         vec![opt.to_owned().into(), val.to_owned().into()].into_iter()
@@ -104,30 +96,36 @@ impl FfmpegEncodeArgs {
             })
             .collect();
 
-        if !svtav1_params.is_empty() {
-            args.push("-svtav1-params".to_owned().into());
-            args.push(svtav1_params.join(":").into());
+        if !vt_params.is_empty() {
+            args.push("-vt-params".to_owned().into());
+            args.push(vt_params.join(":").into());
         }
 
-        // Set preset to a default of 8 if None
-        args.push("-preset".to_owned().into());
-        match &enc.preset {
-            Some(x) => {
-                args.push(x.to_string().into());
+        match enc.bitrate {
+            Some(b) => {
+                args.push("-b:v".to_owned().into());
+                let mut bitrate = b.to_string();
+                bitrate += "k";
+                args.push(bitrate.to_owned().into());
             }
-            None => args.push("8".to_owned().into()),
-        };
-
-        args.push("-crf".to_owned().into());
-        args.push(enc.crf.to_string().into());
-
-        // Set keyint/-g for all vcodecs
-        if let Some(keyint) = keyint {
-            if !args.iter().any(|a| &**a == "-g") {
-                args.push("-g".to_owned().into());
-                args.push(keyint.to_string().into());
-            }
+            None => (),
         }
+
+        match enc.const_quality {
+            Some(q) => {
+                args.push("-q:v".to_owned().into());
+                args.push(q.to_string().to_owned().into());
+            }
+            None => (),
+        }
+
+        // // Set keyint/-g for all vcodecs
+        // if let Some(keyint) = keyint {
+        //     if !args.iter().any(|a| &**a == "-g") {
+        //         args.push("-g".to_owned().into());
+        //         args.push(keyint.to_string().into());
+        //     }
+        // }
 
         for (name, val) in enc.encoder.default_ffmpeg_args() {
             if !args.iter().any(|arg| &**arg == name) {
@@ -136,9 +134,12 @@ impl FfmpegEncodeArgs {
             }
         }
 
+        args.push("-profile".to_owned().into());
+        args.push("main10".to_owned().into());
+
         let pix_fmt = enc.pix_format.unwrap_or(match enc.encoder.as_str() {
-            vc if vc.contains("av1") => PixelFormat::Yuv420p10le,
-            _ => PixelFormat::Yuv420p,
+            vc if vc.contains("av1") => VTPixelFormat::P010le,
+            _ => VTPixelFormat::P010le,
         });
 
         let input_args: Vec<Arc<String>> = enc
@@ -174,28 +175,39 @@ impl FfmpegEncodeArgs {
             }
         }
 
-        let mut output = temporary::process_dir(dir);
-        output.push(match sample {
-            true => match &enc.preset {
-                Some(p) => input.with_extension(format!(
-                    "{}.crf{}.{p}.{}",
-                    enc.ext,
-                    enc.crf,
-                    input.extension().unwrap().to_str().unwrap()
-                )),
-                None => input.with_extension(format!(
-                    "{}.crf{}.8.{}",
-                    enc.ext,
-                    enc.crf,
-                    input.extension().unwrap().to_str().unwrap()
-                )),
-            },
-            false => input.with_extension(format!(
-                "{}.{}",
-                enc.ext,
-                input.extension().unwrap().to_str().unwrap()
-            )),
-        });
+        let output = match output {
+            Some(p) => p,
+            None => {
+                let mut temp = temporary::process_dir(dir);
+                temp.push(match sample {
+                    true => match &enc.bitrate {
+                        Some(b) => input.with_extension(format!(
+                            "{}.b{b}.{}",
+                            enc.ext,
+                            input.extension().unwrap().to_str().unwrap()
+                        )),
+                        None => match &enc.const_quality {
+                            Some(q) => input.with_extension(format!(
+                                "{}.q{q}.{}",
+                                enc.ext,
+                                input.extension().unwrap().to_str().unwrap()
+                            )),
+                            None => input.with_extension(format!(
+                                "{}.{}",
+                                enc.ext,
+                                input.extension().unwrap().to_str().unwrap()
+                            )),
+                        },
+                    },
+                    false => input.with_extension(format!(
+                        "{}.{}",
+                        enc.ext,
+                        input.extension().unwrap().to_str().unwrap()
+                    )),
+                });
+                temp
+            }
+        };
 
         Ok(FfmpegEncodeArgs {
             input,
@@ -236,6 +248,28 @@ impl FfmpegEncodeArgs {
             true => "0:v:0",
             false => "0",
         };
+
+        // println!(
+        //     "\n\n\n{:?}\n\n\n",
+        //     Command::new("ffmpeg")
+        //         .kill_on_drop(true)
+        //         .args(self.input_args.iter().map(|a| &**a))
+        //         .arg("-y")
+        //         .arg2("-i", self.input.clone())
+        //         .arg2("-map", map)
+        //         .arg2("-c:v", "copy")
+        //         .arg2("-c:v:0", &*self.vcodec)
+        //         .args(self.output_args.iter().map(|a| &**a))
+        //         .arg2("-pix_fmt", self.pix_fmt.as_str())
+        //         .arg2_opt("-vf", self.vfilter.clone())
+        //         .arg2("-c:s", "copy")
+        //         .arg2("-c:a", audio_codec)
+        //         .arg2_if(downmix_to_stereo, "-ac", 2)
+        //         .arg2_if(set_ba_128k, "-b:a", "128k")
+        //         .arg2_if(add_faststart, "-movflags", "+faststart")
+        //         .arg2_if(add_cues_to_front, "-cues_to_front", "y")
+        //         .arg(self.output.clone())
+        // );
 
         let enc = Command::new("ffmpeg")
             .kill_on_drop(true)

@@ -1,6 +1,6 @@
 use crate::{
     command::{
-        args, crf_search,
+        args, bitrate_search,
         encode::{self, default_output_name},
         PROGRESS_CHARS,
     },
@@ -24,7 +24,7 @@ use std::{sync::Arc, time::Duration};
 #[group(skip)]
 pub struct Args {
     #[clap(flatten)]
-    pub search: crf_search::Args,
+    pub search: bitrate_search::Args,
 
     #[clap(flatten)]
     pub encode: args::EncodeToOutput,
@@ -57,10 +57,10 @@ pub async fn auto_encode(Args { mut search, encode }: Args) -> anyhow::Result<()
         bar.println(style!("Encoding {out}").dim().to_string());
     }
 
-    let best = match crf_search::run(&search, input_probe.clone(), bar.clone()).await {
+    let best = match bitrate_search::run(&search, input_probe.clone(), bar.clone()).await {
         Ok(best) => best,
         Err(err) => {
-            if let crf_search::Error::NoGoodCrf { last } = &err {
+            if let bitrate_search::Error::NoGoodCrf { last } = &err {
                 // show last sample attempt in progress bar
                 bar.set_style(
                     ProgressStyle::default_bar()
@@ -77,7 +77,7 @@ pub async fn auto_encode(Args { mut search, encode }: Args) -> anyhow::Result<()
                 }
                 bar.finish_with_message(format!(
                     "crf {}, VMAF {vmaf:.2}, size {percent}",
-                    style(TerseF32(last.crf())).red(),
+                    style(last.br()).red(),
                 ));
             }
             bar.finish();
@@ -91,7 +91,7 @@ pub async fn auto_encode(Args { mut search, encode }: Args) -> anyhow::Result<()
     );
     bar.finish_with_message(format!(
         "crf {}, VMAF {:.2}, size {}",
-        style(TerseF32(best.crf())).green(),
+        style(best.br()).green(),
         style(best.enc.vmaf).green(),
         style(format!("{:.0}%", best.enc.encode_percent)).green(),
     ));

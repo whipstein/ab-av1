@@ -1,7 +1,7 @@
 use crate::{
     command::{
         args::{self},
-        encoders::PixelFormat,
+        encoders::VTPixelFormat,
         PROGRESS_CHARS,
     },
     ffprobe,
@@ -59,9 +59,9 @@ pub async fn vmaf(
     bar.set_message("vmaf running, ");
 
     let dprobe = ffprobe::probe(&distorted);
-    let dpix_fmt = dprobe.pixel_format().unwrap_or(PixelFormat::Yuv444p10le);
+    let dpix_fmt = dprobe.pixel_format().unwrap_or(VTPixelFormat::P010le);
     let rprobe = ffprobe::probe(&reference);
-    let rpix_fmt = rprobe.pixel_format().unwrap_or(PixelFormat::Yuv444p10le);
+    let rpix_fmt = rprobe.pixel_format().unwrap_or(VTPixelFormat::P010le);
     let nframes = dprobe.nframes().or_else(|_| rprobe.nframes());
     if let Ok(nframes) = nframes {
         bar.set_length(nframes);

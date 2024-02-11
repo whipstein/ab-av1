@@ -24,7 +24,7 @@ enum Command {
     SampleEncode(command::sample_encode::Args),
     Vmaf(command::vmaf::Args),
     Encode(command::encode::Args),
-    CrfSearch(command::crf_search::Args),
+    BitrateSearch(command::bitrate_search::Args),
     AutoEncode(command::auto_encode::Args),
     PrintCompletions(command::print_completions::Args),
 }
@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
         Command::SampleEncode(args) => command::sample_encode(args).boxed_local(),
         Command::Vmaf(args) => command::vmaf(args).boxed_local(),
         Command::Encode(args) => command::encode(args).boxed_local(),
-        Command::CrfSearch(args) => command::crf_search(args).boxed_local(),
+        Command::BitrateSearch(args) => command::bitrate_search(args).boxed_local(),
         Command::AutoEncode(args) => command::auto_encode(args).boxed_local(),
         Command::PrintCompletions(args) => return command::print_completions(args),
     });
@@ -67,7 +67,7 @@ impl Command {
     fn keep_temp_files(&self) -> bool {
         match self {
             Self::SampleEncode(args) => args.sample.keep,
-            Self::CrfSearch(args) => args.sample.keep,
+            Self::BitrateSearch(args) => args.sample.keep,
             Self::AutoEncode(args) => args.search.sample.keep,
             _ => false,
         }

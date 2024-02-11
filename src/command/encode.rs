@@ -1,9 +1,11 @@
 use crate::{
     command::{
         args::{self},
-        encoders::svtav1::SvtEncoder,
+        // encoders::svtav1::SvtEncoder,
+        encoders::videotoolbox::VideotoolboxEncoder,
         encoders::{Encoder, EncoderString},
-        SmallDuration, PROGRESS_CHARS,
+        SmallDuration,
+        PROGRESS_CHARS,
     },
     console_ext::style,
     ffmpeg,
@@ -28,7 +30,7 @@ use tokio_stream::StreamExt;
 #[group(skip)]
 pub struct Args {
     #[clap(flatten)]
-    pub args: SvtEncoder,
+    pub args: VideotoolboxEncoder,
 
     /// Input video file.
     #[arg(short, long, value_hint = ValueHint::FilePath)]
@@ -81,8 +83,14 @@ pub async fn run(
     bar.set_message("encoding, ");
 
     // let mut enc_args = args.to_encoder_args(&probe)?;
-    let mut enc_args =
-        FfmpegEncodeArgs::from_enc(input.clone(), None, Arc::clone(&args_ref), &probe, false)?;
+    let mut enc_args = FfmpegEncodeArgs::from_encoder(
+        input.clone(),
+        Some(output.clone()),
+        None,
+        Arc::clone(&args_ref),
+        &probe,
+        false,
+    )?;
     enc_args.video_only = video_only;
     let has_audio = probe.has_audio;
     if let Ok(d) = &probe.duration {

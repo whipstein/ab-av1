@@ -3,9 +3,11 @@ mod cache;
 use crate::{
     command::{
         args::{self},
-        encoders::svtav1::SvtEncoder,
-        encoders::{Encoder, PixelFormat},
-        SmallDuration, PROGRESS_CHARS,
+        // encoders::svtav1::SvtEncoder,
+        encoders::videotoolbox::VideotoolboxEncoder,
+        encoders::{Encoder, VTPixelFormat},
+        SmallDuration,
+        PROGRESS_CHARS,
     },
     console_ext::style,
     ffmpeg::{self, FfmpegEncodeArgs},
@@ -39,7 +41,7 @@ use tokio_stream::StreamExt;
 #[group(skip)]
 pub struct Args {
     #[clap(flatten)]
-    pub args: SvtEncoder,
+    pub args: VideotoolboxEncoder,
 
     // /// Encoder constant rate factor (1-63). Lower means better quality.
     // #[arg(long)]
@@ -85,7 +87,6 @@ pub async fn sample_encode(mut args: Args) -> anyhow::Result<()> {
 pub async fn run(
     Args {
         args,
-        // crf,
         input,
         sample: sample_args,
         cache,
@@ -100,8 +101,9 @@ pub async fn run(
     let input_pixel_format = input_probe.pixel_format();
     let input_is_image = input_probe.is_image;
     let input_len = fs::metadata(&*input).await?.len();
-    let enc_args = FfmpegEncodeArgs::from_enc(
+    let enc_args = FfmpegEncodeArgs::from_encoder(
         input.clone(),
+        None,
         None,
         Arc::clone(&args_ref),
         &input_probe,
@@ -213,8 +215,9 @@ pub async fn run(
                 //         true,
                 //     )
                 //     .unwrap(),
-                let ffmpeg_enc = FfmpegEncodeArgs::from_enc(
+                let ffmpeg_enc = FfmpegEncodeArgs::from_encoder(
                     sample.clone(),
+                    None,
                     temp_dir.clone(),
                     Arc::clone(&args_ref),
                     &input_probe,
@@ -245,7 +248,7 @@ pub async fn run(
                         encoded_probe.resolution,
                         enc_args
                             .pix_fmt
-                            .max(input_pixel_format.unwrap_or(PixelFormat::Yuv444p10le)),
+                            .max(input_pixel_format.unwrap_or(VTPixelFormat::P010le)),
                         args_ref.vfilter.as_deref(),
                     ),
                 )?;

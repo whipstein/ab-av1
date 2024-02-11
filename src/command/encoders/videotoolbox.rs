@@ -1,5 +1,5 @@
 use crate::{
-    command::encoders::{Encoder, EncoderString, KeyInterval, PixelFormat, Preset},
+    command::encoders::{Encoder, EncoderString, KeyInterval, Preset, VTPixelFormat},
     ffmpeg::FfmpegEncodeArgs,
     ffprobe::{Ffprobe, ProbeError},
     float::TerseF32,
@@ -15,7 +15,7 @@ use std::{
 };
 
 /// Common svt-av1/ffmpeg input encoding arguments.
-#[derive(Parser, Clone)]
+#[derive(Parser, Clone, Debug)]
 pub struct VideotoolboxEncoder {
     /// Encoder override. See https://ffmpeg.org/ffmpeg-all.html#toc-Video-Encoders.
     ///
@@ -23,9 +23,9 @@ pub struct VideotoolboxEncoder {
     #[arg(value_enum, short, long, default_value = "hevc_videotoolbox")]
     pub encoder: EncoderString,
 
-    /// Input video file.
-    #[arg(short, long, value_hint = ValueHint::FilePath)]
-    pub input: PathBuf,
+    /// Encoded file pre-extension.
+    #[arg(long, default_value = "hevc_vt")]
+    pub ext: String,
 
     /// Ffmpeg video filter applied to the input before av1 encoding.
     /// E.g. --vfilter "scale=1280:-1,fps=24".
@@ -34,9 +34,9 @@ pub struct VideotoolboxEncoder {
     #[arg(long)]
     pub vfilter: Option<String>,
 
-    /// Pixel format. svt-av1 default yuv420p10le.
+    /// Pixel format. svt-av1 default p010le.
     #[arg(value_enum, long)]
-    pub pix_format: Option<PixelFormat>,
+    pub pix_format: Option<VTPixelFormat>,
 
     /// Encoder bitrate metric
     /// Lower values means faster encodes, but with a quality tradeoff.
@@ -66,8 +66,8 @@ pub struct VideotoolboxEncoder {
     /// Additional svt-av1 arg(s). E.g. --svt mbr=2000 --svt film-grain=8
     ///
     /// See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/svt-av1_encoder_user_guide.md#options
-    #[arg(long = "svt", value_parser = parse_svt_arg)]
-    pub svt_args: Vec<Arc<str>>,
+    #[arg(long = "vt", value_parser = parse_vt_arg)]
+    pub vt_args: Vec<Arc<str>>,
 
     /// Additional ffmpeg encoder arg(s). E.g. `--enc x265-params=lossless=1`
     /// These are added as ffmpeg output file options.
@@ -86,33 +86,27 @@ pub struct VideotoolboxEncoder {
 }
 
 impl Encoder for VideotoolboxEncoder {
-    fn to_encoder_args(&self, crf: f32, probe: &Ffprobe) -> anyhow::Result<FfmpegEncodeArgs<'_>> {
-        self.to_ffmpeg_args(crf, probe)
-    }
-
-    fn encode_hint(&self, crf: f32) -> String {
+    fn encode_hint(&self) -> String {
         let Self {
             encoder,
-            input,
+            ext,
             vfilter,
             pix_format,
             bitrate,
             const_quality,
             keyint,
-            svt_args,
+            vt_args,
             enc_args,
             enc_input_args,
         } = self;
 
-        let input = shell_escape::escape(input.display().to_string().into());
-
         let mut hint = "ab-av1 encode".to_owned();
 
         let vcodec = encoder.as_str();
-        if vcodec != "libsvtav1" {
+        if vcodec != "hevc_videotoolbox" {
             write!(hint, " -e {vcodec}").unwrap();
         }
-        write!(hint, " -i {input} --crf {}", TerseF32(crf)).unwrap();
+        write!(hint, " -i <INPUT>").unwrap();
 
         if let Some(bitrate) = bitrate {
             write!(hint, " --bitrate {bitrate}").unwrap();
@@ -129,7 +123,7 @@ impl Encoder for VideotoolboxEncoder {
         if let Some(filter) = vfilter {
             write!(hint, " --vfilter {filter:?}").unwrap();
         }
-        for arg in svt_args {
+        for arg in vt_args {
             write!(hint, " --svt {arg}").unwrap();
         }
         for arg in enc_input_args {
@@ -142,99 +136,6 @@ impl Encoder for VideotoolboxEncoder {
         }
 
         hint
-    }
-
-    fn to_ffmpeg_args(&self, crf: f32, probe: &Ffprobe) -> anyhow::Result<FfmpegEncodeArgs<'_>> {
-        let svtav1 = self.encoder.as_str() == "hevc_videotoolbox";
-        ensure!(
-            svtav1 || self.svt_args.is_empty(),
-            "--svt may only be used with svt-av1"
-        );
-
-        let keyint = self.keyint(probe)?;
-
-        let mut svtav1_params = vec![];
-
-        let mut args: Vec<Arc<String>> = self
-            .enc_args
-            .iter()
-            .flat_map(|arg| {
-                if let Some((opt, val)) = arg.split_once('=') {
-                    if opt == "svtav1-params" {
-                        svtav1_params.push(arg.clone());
-                        vec![].into_iter()
-                    } else {
-                        vec![opt.to_owned().into(), val.to_owned().into()].into_iter()
-                    }
-                } else {
-                    vec![arg.clone().into()].into_iter()
-                }
-            })
-            .collect();
-
-        if !svtav1_params.is_empty() {
-            args.push("-svtav1-params".to_owned().into());
-            args.push(svtav1_params.join(":").into());
-        }
-
-        for (name, val) in self.encoder.default_ffmpeg_args() {
-            if !args.iter().any(|arg| &**arg == name) {
-                args.push(name.to_string().into());
-                args.push(val.to_string().into());
-            }
-        }
-
-        let pix_fmt = self.pix_format.unwrap_or(match self.encoder.as_str() {
-            vc if vc.contains("av1") => PixelFormat::Yuv420p10le,
-            _ => PixelFormat::Yuv420p,
-        });
-
-        let input_args: Vec<Arc<String>> = self
-            .enc_input_args
-            .iter()
-            .flat_map(|arg| {
-                if let Some((opt, val)) = arg.split_once('=') {
-                    vec![opt.to_owned().into(), val.to_owned().into()].into_iter()
-                } else {
-                    vec![arg.clone().into()].into_iter()
-                }
-            })
-            .collect();
-
-        // ban usage of the bits we already set via other args & logic
-        let reserved = HashMap::from([
-            ("-c:a", " use --acodec"),
-            ("-codec:a", " use --acodec"),
-            ("-acodec", " use --acodec"),
-            ("-i", ""),
-            ("-y", ""),
-            ("-n", ""),
-            ("-c:v", " use --encoder"),
-            ("-codec:v", " use --encoder"),
-            ("-vcodec", " use --encoder"),
-            ("-pix_fmt", " use --pix-format"),
-            ("-crf", ""),
-            ("-preset", " use --preset"),
-            ("-vf", " use --vfilter"),
-            ("-filter:v", " use --vfilter"),
-        ]);
-        for arg in args.iter().chain(input_args.iter()) {
-            if let Some(hint) = reserved.get(arg.as_str()) {
-                anyhow::bail!("Encoder argument `{arg}` not allowed{hint}");
-            }
-        }
-
-        Ok(FfmpegEncodeArgs {
-            input: &self.input,
-            vcodec: self.encoder.0.clone(),
-            pix_fmt,
-            vfilter: self.vfilter.as_deref(),
-            crf,
-            preset,
-            output_args: args,
-            input_args,
-            video_only: false,
-        })
     }
 
     fn keyint(&self, probe: &Ffprobe) -> anyhow::Result<Option<i32>> {
@@ -262,10 +163,10 @@ impl Encoder for VideotoolboxEncoder {
     }
 }
 
-fn parse_svt_arg(arg: &str) -> anyhow::Result<Arc<str>> {
+fn parse_vt_arg(arg: &str) -> anyhow::Result<Arc<str>> {
     let arg = arg.trim_start_matches('-').to_owned();
 
-    for deny in ["crf", "preset", "keyint", "scd", "input-depth"] {
+    for deny in ["bitrate", "quality", "keyint", "input-depth"] {
         ensure!(!arg.starts_with(deny), "'{deny}' cannot be used here");
     }
 
@@ -286,131 +187,131 @@ fn parse_enc_arg(arg: &str) -> anyhow::Result<String> {
     Ok(arg)
 }
 
-mod test {
-    use super::*;
+// mod test {
+//     use super::*;
 
-    /// Should use keyint & scd defaults for >3m inputs.
-    #[test]
-    fn svtav1_to_ffmpeg_args_default_over_3m() {
-        let enc = VideotoolboxEncoder {
-            encoder: EncoderString("hevc_videotoolbox".into()),
-            input: "vid.mp4".into(),
-            vfilter: Some("scale=320:-1,fps=film".into()),
-            bitrate: Some(1000),
-            const_quality: None,
-            pix_format: None,
-            keyint: None,
-            svt_args: vec!["film-grain=30".into()],
-            enc_args: <_>::default(),
-            enc_input_args: <_>::default(),
-        };
+//     /// Should use keyint & scd defaults for >3m inputs.
+//     #[test]
+//     fn svtav1_to_ffmpeg_args_default_over_3m() {
+//         let enc = VideotoolboxEncoder {
+//             encoder: EncoderString("hevc_videotoolbox".into()),
+//             input: "vid.mp4".into(),
+//             vfilter: Some("scale=320:-1,fps=film".into()),
+//             bitrate: Some(1000),
+//             const_quality: None,
+//             pix_format: None,
+//             keyint: None,
+//             svt_args: vec!["film-grain=30".into()],
+//             enc_args: <_>::default(),
+//             enc_input_args: <_>::default(),
+//         };
 
-        let probe = Ffprobe {
-            duration: Ok(Duration::from_secs(300)),
-            has_audio: true,
-            max_audio_channels: None,
-            fps: Ok(30.0),
-            resolution: Some((1280, 720)),
-            is_image: false,
-            pix_fmt: None,
-        };
+//         let probe = Ffprobe {
+//             duration: Ok(Duration::from_secs(300)),
+//             has_audio: true,
+//             max_audio_channels: None,
+//             fps: Ok(30.0),
+//             resolution: Some((1280, 720)),
+//             is_image: false,
+//             pix_fmt: None,
+//         };
 
-        let FfmpegEncodeArgs {
-            input,
-            vcodec,
-            vfilter,
-            pix_fmt,
-            crf,
-            preset,
-            output_args,
-            input_args,
-            video_only,
-        } = enc.to_ffmpeg_args(32.0, &probe).expect("to_ffmpeg_args");
+//         let FfmpegEncodeArgs {
+//             input,
+//             vcodec,
+//             vfilter,
+//             pix_fmt,
+//             crf,
+//             preset,
+//             output_args,
+//             input_args,
+//             video_only,
+//         } = enc.to_ffmpeg_args(32.0, &probe).expect("to_ffmpeg_args");
 
-        assert_eq!(&*vcodec, "libsvtav1");
-        assert_eq!(input, enc.input);
-        assert_eq!(vfilter, Some("scale=320:-1,fps=film"));
-        assert_eq!(crf, 32.0);
-        assert_eq!(preset, Some("8".into()));
-        assert_eq!(pix_fmt, PixelFormat::Yuv420p10le);
-        assert!(!video_only);
+//         assert_eq!(&*vcodec, "libsvtav1");
+//         assert_eq!(input, enc.input);
+//         assert_eq!(vfilter, Some("scale=320:-1,fps=film"));
+//         assert_eq!(crf, 32.0);
+//         assert_eq!(preset, Some("8".into()));
+//         assert_eq!(pix_fmt, PixelFormat::Yuv420p10le);
+//         assert!(!video_only);
 
-        assert!(
-            output_args
-                .windows(2)
-                .any(|w| w[0].as_str() == "-g" && w[1].as_str() == "240"),
-            "expected -g in {output_args:?}"
-        );
-        let svtargs_idx = output_args
-            .iter()
-            .position(|a| a.as_str() == "-svtav1-params")
-            .expect("missing -svtav1-params");
-        let svtargs = output_args
-            .get(svtargs_idx + 1)
-            .expect("missing -svtav1-params value")
-            .as_str();
-        assert_eq!(svtargs, "scd=1:film-grain=30");
-        assert!(input_args.is_empty());
-    }
+//         assert!(
+//             output_args
+//                 .windows(2)
+//                 .any(|w| w[0].as_str() == "-g" && w[1].as_str() == "240"),
+//             "expected -g in {output_args:?}"
+//         );
+//         let svtargs_idx = output_args
+//             .iter()
+//             .position(|a| a.as_str() == "-svtav1-params")
+//             .expect("missing -svtav1-params");
+//         let svtargs = output_args
+//             .get(svtargs_idx + 1)
+//             .expect("missing -svtav1-params value")
+//             .as_str();
+//         assert_eq!(svtargs, "scd=1:film-grain=30");
+//         assert!(input_args.is_empty());
+//     }
 
-    #[test]
-    fn svtav1_to_ffmpeg_args_default_under_3m() {
-        let enc = VideotoolboxEncoder {
-            encoder: EncoderString("hevc_videotoolbox".into()),
-            input: "vid.mp4".into(),
-            vfilter: None,
-            bitrate: None,
-            const_quality: Some(20),
-            pix_format: Some(PixelFormat::Yuv420p),
-            keyint: None,
-            svt_args: vec![],
-            enc_args: <_>::default(),
-            enc_input_args: <_>::default(),
-        };
+//     #[test]
+//     fn svtav1_to_ffmpeg_args_default_under_3m() {
+//         let enc = VideotoolboxEncoder {
+//             encoder: EncoderString("hevc_videotoolbox".into()),
+//             input: "vid.mp4".into(),
+//             vfilter: None,
+//             bitrate: None,
+//             const_quality: Some(20),
+//             pix_format: Some(PixelFormat::Yuv420p),
+//             keyint: None,
+//             svt_args: vec![],
+//             enc_args: <_>::default(),
+//             enc_input_args: <_>::default(),
+//         };
 
-        let probe = Ffprobe {
-            duration: Ok(Duration::from_secs(179)),
-            has_audio: true,
-            max_audio_channels: None,
-            fps: Ok(24.0),
-            resolution: Some((1280, 720)),
-            is_image: false,
-            pix_fmt: None,
-        };
+//         let probe = Ffprobe {
+//             duration: Ok(Duration::from_secs(179)),
+//             has_audio: true,
+//             max_audio_channels: None,
+//             fps: Ok(24.0),
+//             resolution: Some((1280, 720)),
+//             is_image: false,
+//             pix_fmt: None,
+//         };
 
-        let FfmpegEncodeArgs {
-            input,
-            vcodec,
-            vfilter,
-            pix_fmt,
-            crf,
-            preset,
-            output_args,
-            input_args,
-            video_only,
-        } = enc.to_ffmpeg_args(32.0, &probe).expect("to_ffmpeg_args");
+//         let FfmpegEncodeArgs {
+//             input,
+//             vcodec,
+//             vfilter,
+//             pix_fmt,
+//             crf,
+//             preset,
+//             output_args,
+//             input_args,
+//             video_only,
+//         } = enc.to_ffmpeg_args(32.0, &probe).expect("to_ffmpeg_args");
 
-        assert_eq!(&*vcodec, "libsvtav1");
-        assert_eq!(input, enc.input);
-        assert_eq!(vfilter, None);
-        assert_eq!(crf, 32.0);
-        assert_eq!(preset, Some("7".into()));
-        assert_eq!(pix_fmt, PixelFormat::Yuv420p);
-        assert!(!video_only);
+//         assert_eq!(&*vcodec, "libsvtav1");
+//         assert_eq!(input, enc.input);
+//         assert_eq!(vfilter, None);
+//         assert_eq!(crf, 32.0);
+//         assert_eq!(preset, Some("7".into()));
+//         assert_eq!(pix_fmt, PixelFormat::Yuv420p);
+//         assert!(!video_only);
 
-        assert!(
-            !output_args.iter().any(|a| a.as_str() == "-g"),
-            "unexpected -g in {output_args:?}"
-        );
-        let svtargs_idx = output_args
-            .iter()
-            .position(|a| a.as_str() == "-svtav1-params")
-            .expect("missing -svtav1-params");
-        let svtargs = output_args
-            .get(svtargs_idx + 1)
-            .expect("missing -svtav1-params value")
-            .as_str();
-        assert_eq!(svtargs, "scd=0");
-        assert!(input_args.is_empty());
-    }
-}
+//         assert!(
+//             !output_args.iter().any(|a| a.as_str() == "-g"),
+//             "unexpected -g in {output_args:?}"
+//         );
+//         let svtargs_idx = output_args
+//             .iter()
+//             .position(|a| a.as_str() == "-svtav1-params")
+//             .expect("missing -svtav1-params");
+//         let svtargs = output_args
+//             .get(svtargs_idx + 1)
+//             .expect("missing -svtav1-params value")
+//             .as_str();
+//         assert_eq!(svtargs, "scd=0");
+//         assert!(input_args.is_empty());
+//     }
+// }
