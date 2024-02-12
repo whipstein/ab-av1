@@ -1,6 +1,7 @@
 mod err;
 
 pub use err::Error;
+use futures::io::LineWriter;
 
 use crate::{
     command::{
@@ -28,11 +29,11 @@ use std::{
 
 const BAR_LEN: u64 = 1_000_000_000;
 
-/// Interpolated binary search using sample-encode to find the best crf
+/// Interpolated binary search using sample-encode to find the best bitrate
 /// value delivering min-vmaf & max-encoded-percent.
 ///
 /// Outputs:
-/// * Best crf value
+/// * Best bitrate value
 /// * Mean sample VMAF score
 /// * Predicted full encode size
 /// * Predicted full encode time
@@ -147,11 +148,7 @@ pub async fn run(
 
     let br_increment = br_increment
         .unwrap_or_else(|| args.encoder.default_br_increment())
-        .max(100);
-
-    let min_q = q_from_br_lin(*min_br, br_increment);
-    let max_q = q_from_br_lin(max_br, br_increment);
-    let mut q: f64 = (min_q + max_q) / 2.0;
+        .max(1);
 
     let mut args = sample_encode::Args {
         args: args.clone(),
@@ -166,6 +163,14 @@ pub async fn run(
     let sample_bar = ProgressBar::hidden();
     let mut br_attempts = Vec::new();
 
+    let mut sample = Sample::new(
+        sample_encode::Output::new(),
+        *min_br,
+        max_br,
+        br_increment,
+        Transform::Linear,
+    );
+
     for run in 1.. {
         // how much we're prepared to go higher than the min-vmaf
         let higher_tolerance = match thorough {
@@ -174,7 +179,8 @@ pub async fn run(
             // increment 0.1 => +0.1, +0.1, +0.1, +0.16 ..
             _ => (br_increment as f32 * 2_f32.powi(run as i32 - 1) * 0.1).max(0.1),
         };
-        args.args.bitrate = Some(q.to_br(br_increment));
+
+        args.args.bitrate = Some(sample.val);
         bar.set_message(format!(
             "sampling bitrate {}k, ",
             args.args.bitrate.unwrap().to_string()
@@ -201,16 +207,14 @@ pub async fn run(
             }
         };
 
-        // initial sample encoding results
-        let sample = Sample {
-            enc: sample_task??,
-            br_increment,
-            q,
-        };
+        // load sample encoding results
+        sample.enc = sample_task??;
+
         let from_cache = sample.enc.from_cache;
         br_attempts.push(sample.clone());
         let sample_small_enough = sample.enc.encode_percent <= *max_encoded_percent as _;
 
+        sample.val_to_prev();
         if sample.enc.vmaf > *min_vmaf {
             // Good Enough
 
@@ -231,22 +235,22 @@ pub async fn run(
                     return Ok(sample);
                 }
                 Some(lower) => {
-                    q = vmaf_lerp_q(*min_vmaf, lower, &sample);
+                    sample.vmaf_lerp_q(*min_vmaf, Some(lower), None);
                 }
-                None if sample.q == min_q => {
+                None if sample.q == sample.min_q => {
                     ensure_or_no_good_br!(sample_small_enough, sample);
                     return Ok(sample);
                 }
-                None if run == 1 && sample.q + 1.0 < min_q => {
-                    q = (sample.q + min_q) / 2.0;
+                None if run == 1 && sample.q + 1.0 < sample.min_q => {
+                    sample.set_q((sample.q + sample.min_q) / 2.0);
                 }
-                None => q = min_q,
+                None => sample.set_q(sample.min_q),
             };
         } else {
             // Not Good Enough
 
             // is the encoding too big or using maximum bitrate?
-            if !sample_small_enough || sample.q == max_q {
+            if !sample_small_enough || sample.q == sample.max_q {
                 sample.print_attempt(&bar, *min_vmaf, *max_encoded_percent, *quiet, from_cache);
                 ensure_or_no_good_br!(false, sample);
             }
@@ -265,12 +269,12 @@ pub async fn run(
                     return Ok(upper.clone());
                 }
                 Some(upper) => {
-                    q = vmaf_lerp_q(*min_vmaf, &sample, upper);
+                    sample.vmaf_lerp_q(*min_vmaf, None, Some(upper));
                 }
-                None if run == 1 && sample.q > max_q + 1.0 => {
-                    q = (max_q + sample.q) / 2.0;
+                None if run == 1 && sample.q > sample.max_q + 1.0 => {
+                    sample.set_q((sample.max_q + sample.q) / 2.0);
                 }
-                None => q = max_q,
+                None => sample.set_q(sample.max_q),
             };
         }
         sample.print_attempt(&bar, *min_vmaf, *max_encoded_percent, *quiet, from_cache);
@@ -282,13 +286,18 @@ pub async fn run(
 #[derive(Debug, Clone)]
 pub struct Sample {
     pub enc: sample_encode::Output,
-    pub br_increment: u32,
-    pub q: f64,
+    val: u32,
+    prev: (u32, f64),
+    inc: u32,
+    q: f64,
+    min_q: f64,
+    max_q: f64,
+    transform: TransformValue,
 }
 
 impl Sample {
     pub fn br(&self) -> u32 {
-        self.q.to_br(self.br_increment)
+        self.prev.0
     }
 
     fn print_attempt(
@@ -306,7 +315,7 @@ impl Sample {
         let mut br = style(self.br());
         let vmaf_label = style("VMAF").dim();
         let mut vmaf = style(self.enc.vmaf);
-        let mut percent = style!("{:.0}%", self.enc.encode_percent);
+        let mut percent = style!("{:.1}%", self.enc.encode_percent);
         let open = style("(").dim();
         let close = style(")").dim();
         let cache_msg = match from_cache {
@@ -331,6 +340,106 @@ impl Sample {
             eprintln!("{msg}");
         }
     }
+
+    fn new(
+        enc: sample_encode::Output,
+        min_br: u32,
+        max_br: u32,
+        br_increment: u32,
+        transform: Transform,
+    ) -> Self {
+        let transform = TransformValue(transform);
+        let min_q = transform.calc(f64::from(min_br));
+        let max_q = transform.calc(f64::from(max_br));
+        let q: f64 = (min_q + max_q) / 2.0;
+        let val = Sample::num_from_q(q, br_increment, &transform);
+
+        Sample {
+            enc,
+            val,
+            prev: (val, q),
+            inc: br_increment,
+            q,
+            min_q,
+            max_q,
+            transform,
+        }
+    }
+
+    fn mod_inc(val: f64, inc: u32) -> u32 {
+        (val as u32 / inc) * inc
+    }
+
+    fn num_from_q(q: f64, inc: u32, transform: &TransformValue) -> u32 {
+        let val = transform.inverse(q) as u32;
+        (val / inc) * inc
+    }
+
+    fn num_from_val(val: u32, inc: u32, transform: &TransformValue) -> f64 {
+        let q = transform.calc(f64::from(val));
+        (q / f64::from(inc)).round() * f64::from(inc)
+    }
+
+    fn from_q(&self) -> u32 {
+        Sample::num_from_q(self.q, self.inc, &self.transform)
+    }
+
+    fn from_val(&self) -> f64 {
+        Sample::num_from_val(self.val, self.inc, &self.transform)
+    }
+
+    fn q_from_val(&mut self) {
+        self.q = self.from_val();
+    }
+
+    fn val_from_q(&mut self) {
+        self.val = self.from_q();
+    }
+
+    fn set_q(&mut self, q: f64) {
+        self.val_to_prev();
+        self.q = q;
+        self.val_from_q();
+    }
+
+    fn set_val(&mut self, val: u32) {
+        self.val_to_prev();
+        self.val = val;
+        self.q_from_val();
+    }
+
+    fn val_to_prev(&mut self) {
+        self.prev = (self.val, self.q);
+    }
+
+    /// Linear interpolation of new q based on
+    ///
+    /// y - y0   y1 - y0
+    /// ------ = -------
+    /// x - x0   x1 - x0
+    ///
+    /// Non-linear relationships are addressed through the transform field
+    ///
+    fn vmaf_lerp_q(&mut self, min_vmaf: f32, worse_q: Option<&Sample>, better_q: Option<&Sample>) {
+        let (worse_q, worse_vmaf) = match worse_q {
+            Some(worse) => (worse.q, worse.enc.vmaf),
+            None => (self.q, self.enc.vmaf),
+        };
+        let (better_q, better_vmaf) = match better_q {
+            Some(better) => (better.q, better.enc.vmaf),
+            None => (self.q, self.enc.vmaf),
+        };
+
+        assert!(
+            worse_vmaf <= min_vmaf && worse_vmaf < better_vmaf && worse_q < better_q,
+            "invalid vmaf_lerp_br usage: ({min_vmaf}, {worse_q:?}, {better_q:?})"
+        );
+
+        let lerp = (worse_q * (better_vmaf - min_vmaf) as f64
+            + better_q * (min_vmaf - worse_vmaf) as f64)
+            / (better_vmaf - worse_vmaf) as f64;
+        self.set_q(lerp.clamp(worse_q + 1.0, better_q - 1.0));
+    }
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -346,48 +455,18 @@ impl StdoutFormat {
                 let enc = &sample.enc;
                 let vmaf = style(enc.vmaf).bold().green();
                 let size = style(HumanBytes(enc.predicted_encode_size)).bold().green();
-                let percent = style!("{}%", enc.encode_percent.round()).bold().green();
+                let percent = style!("{:.1}%", enc.encode_percent).bold().green();
                 let time = style(HumanDuration(enc.predicted_encode_time)).bold();
                 let enc_description = match image {
                     true => "image",
                     false => "video stream",
                 };
                 println!(
-                    "br {br} VMAF {vmaf:.2} predicted {enc_description} size {size} ({percent}) taking {time}"
+                    "bitrate {br} VMAF {vmaf:.2} predicted {enc_description} size {size} ({percent}) taking {time}"
                 );
             }
         }
     }
-}
-
-/// Produce a q value between given samples using vmaf score linear interpolation
-/// so the output q value should produce the `min_vmaf`.
-///
-/// Note: `better_q` will be a numerically higher q value (higher quality),
-///       `worse_q` a numerically lower q value (worse quality).
-///
-/// # Issues
-/// Bitrate values do not linearly map to VMAF changes (or anything?) so this is a flawed method,
-/// though it seems to work better than a binary search.
-/// Perhaps a better approximation of a general br->vmaf model could be found.
-/// This would be helpful particularly for small br-increments.
-fn vmaf_lerp_q(min_vmaf: f32, worse_q: &Sample, better_q: &Sample) -> f64 {
-    assert!(
-        worse_q.enc.vmaf <= min_vmaf
-            && worse_q.enc.vmaf < better_q.enc.vmaf
-            && worse_q.q < better_q.q,
-        "invalid vmaf_lerp_br usage: ({min_vmaf}, {worse_q:?}, {better_q:?})"
-    );
-
-    // let vmaf_diff = better_q.enc.vmaf - worse_q.enc.vmaf;
-    // let vmaf_factor = (min_vmaf - worse_q.enc.vmaf) / vmaf_diff;
-
-    // let q_diff = better_q.q - worse_q.q;
-    // let lerp = better_q.q - q_diff * vmaf_factor as f64;
-    let lerp = (worse_q.q * (better_q.enc.vmaf - min_vmaf) as f64
-        + better_q.q * (min_vmaf - worse_q.enc.vmaf) as f64)
-        / (better_q.enc.vmaf - worse_q.enc.vmaf) as f64;
-    lerp.clamp(worse_q.q + 1.0, better_q.q - 1.0)
 }
 
 /// sample_progress: [0, 1]
@@ -403,98 +482,56 @@ fn guess_progress(run: usize, sample_progress: f64, thorough: bool) -> f64 {
     ((run - 1) as f64 + sample_progress) * BAR_LEN as f64 / total_runs_guess
 }
 
-/// Calculate "q" as a quality value integer multiple of bitrate.
-///
-/// * br=12500, inc=10 -> q=1250
-/// * br=5000, inc=100 -> q=50
-#[inline]
-fn q_from_br(br: u32, br_increment: u32) -> u64 {
-    (f64::from(br) / f64::from(br_increment)) as _
+#[derive(Debug, Clone)]
+enum Transform {
+    Linear,
+    Sqrt,
+    Ln,
+}
+trait Transformation {
+    fn calc(&self, val: f64) -> f64;
+
+    fn inverse(&self, val: f64) -> f64;
 }
 
-/// Ln Transform bitrate.
-///
-/// * br=12500 -> q=9.433483923290392
-/// * br=5000 -> q=8.517193191416238
-#[inline]
-fn q_from_br_ln(br: u32, br_increment: u32) -> f64 {
-    f64::from(br).ln() as _
-}
+#[derive(Debug, Clone)]
+struct TransformValue(Transform);
+impl Transformation for TransformValue {
+    fn calc(&self, val: f64) -> f64 {
+        match self.0 {
+            Transform::Linear => f64::from(val) as _,
+            Transform::Sqrt => f64::from(val).powi(2) as _,
+            Transform::Ln => f64::from(val).exp() as _,
+        }
+    }
 
-/// Sqrt Transform bitrate.
-///
-/// * br=12500 -> q=111.80339887498948
-/// * br=5000 -> q=70.71067811865476
-#[inline]
-fn q_from_br_sqrt(br: u32, br_increment: u32) -> f64 {
-    f64::from(br).sqrt() as _
-}
-
-/// Linear Transform bitrate.
-///
-/// * br=12500 -> q=12500
-/// * br=5000 -> q=5000
-#[inline]
-fn q_from_br_lin(br: u32, br_increment: u32) -> f64 {
-    (f64::from(br) / f64::from(br_increment)) as _
-}
-
-/// No Transform bitrate.
-///
-/// * br=12500 -> q=12500
-/// * br=5000 -> q=5000
-#[inline]
-fn q_from_br_no(br: u32, br_increment: u32) -> f64 {
-    f64::from(br) as _
-}
-
-trait QualityValue {
-    fn to_br(self, br_increment: u32) -> u32;
-}
-impl QualityValue for u64 {
-    #[inline]
-    fn to_br(self, br_increment: u32) -> u32 {
-        ((self as u64) * u64::from(br_increment)) as _
+    fn inverse(&self, val: f64) -> f64 {
+        match self.0 {
+            Transform::Linear => f64::from(val) as _,
+            Transform::Sqrt => f64::from(val).sqrt() as _,
+            Transform::Ln => f64::from(val).ln() as _,
+        }
     }
 }
 
-impl QualityValue for f64 {
-    // #[inline]
-    // fn to_br(self, br_increment: u32) -> u32 {
-    //     self.exp().round() as _
-    // }
-    // #[inline]
-    // fn to_br(self, br_increment: u32) -> u32 {
-    //     self.powi(2).round() as _
-    // }
-    #[inline]
-    fn to_br(self, br_increment: u32) -> u32 {
-        (self * br_increment as f64).round() as _
-    }
-    // #[inline]
-    // fn to_br(self, br_increment: u32) -> u32 {
-    //     self.round() as _
-    // }
-}
+// mod test {
+//     use super::*;
 
-mod test {
-    use super::*;
+//     #[test]
+//     fn q_br_lin_conversions() {
+//         assert_eq!(q_from_br(12500, 10), 1250);
+//         assert_eq!(q_from_br(5000, 100), 50);
+//     }
 
-    #[test]
-    fn q_br_lin_conversions() {
-        assert_eq!(q_from_br(12500, 10), 1250);
-        assert_eq!(q_from_br(5000, 100), 50);
-    }
+//     // #[test]
+//     // fn q_br_ln_conversions() {
+//     //     assert_eq!(q_from_br_ln(12500, 10), 9.433483923290392);
+//     //     assert_eq!(q_from_br_ln(5000, 10), 8.517193191416238);
+//     // }
 
-    #[test]
-    fn q_br_ln_conversions() {
-        assert_eq!(q_from_br_ln(12500, 10), 9.433483923290392);
-        assert_eq!(q_from_br_ln(5000, 10), 8.517193191416238);
-    }
-
-    #[test]
-    fn q_br_sqrt_conversions() {
-        assert_eq!(q_from_br_sqrt(12500, 10), 111.80339887498948);
-        assert_eq!(q_from_br_sqrt(5000, 10), 70.71067811865476);
-    }
-}
+//     // #[test]
+//     // fn q_br_sqrt_conversions() {
+//     //     assert_eq!(q_from_br_sqrt(12500, 10), 111.80339887498948);
+//     //     assert_eq!(q_from_br_sqrt(5000, 10), 70.71067811865476);
+//     // }
+// }

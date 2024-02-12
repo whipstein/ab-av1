@@ -20,6 +20,7 @@ use crate::{
 use anyhow::ensure;
 use clap::{ArgAction, Parser, ValueHint};
 use console::style;
+use derive_new::new;
 use indicatif::{HumanBytes, HumanDuration, ProgressBar, ProgressStyle};
 use std::{
     path::{Path, PathBuf},
@@ -528,20 +529,25 @@ impl StdoutFormat {
 }
 
 /// Sample encode result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, new)]
 pub struct Output {
     /// Sample mean VMAF score.
+    #[new(default)]
     pub vmaf: f32,
     /// Estimated full encoded **video stream** size.
     ///
     /// Encoded sample size multiplied by duration.
+    #[new(default)]
     pub predicted_encode_size: u64,
     /// Sample mean encoded percentage.
+    #[new(default)]
     pub encode_percent: f64,
     /// Estimated full encode time.
     ///
     /// Sample encode time multiplied by duration.
+    #[new(default)]
     pub predicted_encode_time: Duration,
     /// All sample results were read from the cache.
+    #[new(default)]
     pub from_cache: bool,
 }
