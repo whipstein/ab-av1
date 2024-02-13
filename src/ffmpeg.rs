@@ -2,7 +2,8 @@
 use crate::{
     // command::encoders::svtav1::SvtEncoder,
     command::encoders::{
-        videotoolbox::VideotoolboxEncoder, Encoder, PixelFormat, Preset, VTPixelFormat,
+        videotoolbox::{VTPixelFormat, VideotoolboxEncoder},
+        Encoder, PixelFormat, Preset,
     },
     ffprobe::Ffprobe,
     float::TerseF32,
@@ -70,14 +71,14 @@ impl FfmpegEncodeArgs {
     ) -> anyhow::Result<Self> {
         let vt = enc.encoder.as_str() == "hevc_videotoolbox";
         ensure!(
-            vt || enc.vt_args.is_empty(),
+            vt || enc.lib_args.is_empty(),
             "--vt may only be used with hevc_videotoolbox"
         );
 
         let keyint = enc.keyint(probe)?;
 
         let mut vt_params = vec![];
-        vt_params.extend(enc.vt_args.iter().map(|a| a.to_string()));
+        vt_params.extend(enc.lib_args.iter().map(|a| a.to_string()));
 
         let mut args: Vec<Arc<String>> = enc
             .enc_args
@@ -111,7 +112,7 @@ impl FfmpegEncodeArgs {
             None => (),
         }
 
-        match enc.const_quality {
+        match enc.quality {
             Some(q) => {
                 args.push("-q:v".to_owned().into());
                 args.push(q.to_string().to_owned().into());
@@ -134,8 +135,8 @@ impl FfmpegEncodeArgs {
             }
         }
 
-        args.push("-profile".to_owned().into());
-        args.push("main10".to_owned().into());
+        // args.push("-profile".to_owned().into());
+        // args.push("main10".to_owned().into());
 
         let pix_fmt = enc.pix_format.unwrap_or(match enc.encoder.as_str() {
             vc if vc.contains("av1") => VTPixelFormat::P010le,
@@ -186,7 +187,7 @@ impl FfmpegEncodeArgs {
                             enc.ext,
                             input.extension().unwrap().to_str().unwrap()
                         )),
-                        None => match &enc.const_quality {
+                        None => match &enc.quality {
                             Some(q) => input.with_extension(format!(
                                 "{}.q{q}.{}",
                                 enc.ext,

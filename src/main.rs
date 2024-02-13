@@ -25,8 +25,10 @@ enum Command {
     Vmaf(command::vmaf::Args),
     Encode(command::encode::Args),
     BitrateSearch(command::bitrate_search::Args),
+    CqSearch(command::cq_search::Args),
     AutoEncode(command::auto_encode::Args),
     PrintCompletions(command::print_completions::Args),
+    Probe(command::probe::Args),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -42,8 +44,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Vmaf(args) => command::vmaf(args).boxed_local(),
         Command::Encode(args) => command::encode(args).boxed_local(),
         Command::BitrateSearch(args) => command::bitrate_search(args).boxed_local(),
+        Command::CqSearch(args) => command::cq_search(args).boxed_local(),
         Command::AutoEncode(args) => command::auto_encode(args).boxed_local(),
         Command::PrintCompletions(args) => return command::print_completions(args),
+        Command::Probe(args) => command::probe(args).boxed_local(),
     });
 
     let out = tokio::select! {
@@ -68,6 +72,7 @@ impl Command {
         match self {
             Self::SampleEncode(args) => args.sample.keep,
             Self::BitrateSearch(args) => args.sample.keep,
+            Self::CqSearch(args) => args.sample.keep,
             Self::AutoEncode(args) => args.search.sample.keep,
             _ => false,
         }

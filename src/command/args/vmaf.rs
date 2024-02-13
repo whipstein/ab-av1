@@ -1,4 +1,4 @@
-use crate::command::encoders::VTPixelFormat;
+use crate::command::encoders::{videotoolbox::VTPixelFormat, PixelFormat};
 use anyhow::Context;
 use clap::Parser;
 use std::{borrow::Cow, fmt::Display, sync::Arc, thread};

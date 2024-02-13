@@ -27,6 +27,8 @@ pub trait Encoder {
     // fn set_input(&mut self, input: &PathBuf) -> &Self;
 
     fn keyint(&self, probe: &Ffprobe) -> anyhow::Result<Option<i32>>;
+
+    fn search_params(&self) -> Vec<&str>;
 }
 
 /// Video codec for encoding.
@@ -60,10 +62,26 @@ impl EncoderString {
     }
 
     pub fn default_br_increment(&self) -> u32 {
-        100
+        10
     }
 
     pub fn default_max_br(&self) -> u32 {
+        50000
+    }
+
+    pub fn default_cq_increment(&self) -> f32 {
+        1.0
+    }
+
+    pub fn default_max_cq(&self) -> f32 {
+        100.0
+    }
+
+    pub fn default_inc(&self) -> u32 {
+        100
+    }
+
+    pub fn default_max(&self) -> u32 {
         50000
     }
 
@@ -201,50 +219,6 @@ impl TryFrom<&str> for PixelFormat {
             "yuv420p10le" => Ok(Self::Yuv420p10le),
             "yuv444p10le" => Ok(Self::Yuv444p10le),
             "yuv420p" => Ok(Self::Yuv420p),
-            _ => Err(()),
-        }
-    }
-}
-
-/// Ordered by ascending quality.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[clap(rename_all = "lower")]
-pub enum VTPixelFormat {
-    VtVld,
-    Nv12,
-    Yuv420p,
-    Bgra,
-    P010le,
-}
-
-impl VTPixelFormat {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::VtVld => "videotoolbox_vld",
-            Self::Nv12 => "nv12",
-            Self::Yuv420p => "yuv420p",
-            Self::Bgra => "bgra",
-            Self::P010le => "p010le",
-        }
-    }
-}
-
-impl fmt::Display for VTPixelFormat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.as_str().fmt(f)
-    }
-}
-
-impl TryFrom<&str> for VTPixelFormat {
-    type Error = ();
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "videotoolbox_vld" => Ok(Self::VtVld),
-            "nv12" => Ok(Self::Nv12),
-            "yuv420p" => Ok(Self::Yuv420p),
-            "bgra" => Ok(Self::Bgra),
-            "p010le" => Ok(Self::P010le),
             _ => Err(()),
         }
     }

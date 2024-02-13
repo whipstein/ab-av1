@@ -1,6 +1,7 @@
 //! ffprobe logic
-use crate::command::encoders::VTPixelFormat;
+use crate::command::encoders::{videotoolbox::VTPixelFormat, PixelFormat};
 use anyhow::{anyhow, Context};
+use serde_json::{self, json};
 use std::{fmt, fs::File, io::Read, path::Path, time::Duration};
 
 pub struct Ffprobe {
@@ -39,11 +40,16 @@ impl Ffprobe {
 }
 
 /// Try to ffprobe the given input.
-pub fn probe(input: &Path) -> Ffprobe {
+pub fn probe(input: &Path, disp: bool) -> Ffprobe {
     let is_image = is_image(input).unwrap_or(false);
 
     let probe = match ffprobe::ffprobe(input) {
-        Ok(p) => p,
+        Ok(p) => {
+            if disp {
+                println!("\n\n\n{:?}\n\n\n", json!(p));
+            }
+            p
+        }
         Err(err) => {
             return Ffprobe {
                 duration: Err(ProbeError(format!("ffprobe: {err}"))),

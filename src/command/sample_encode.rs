@@ -4,8 +4,8 @@ use crate::{
     command::{
         args::{self},
         // encoders::svtav1::SvtEncoder,
-        encoders::videotoolbox::VideotoolboxEncoder,
-        encoders::{Encoder, VTPixelFormat},
+        encoders::videotoolbox::{VTPixelFormat, VideotoolboxEncoder},
+        encoders::{Encoder, PixelFormat},
         SmallDuration,
         PROGRESS_CHARS,
     },
@@ -79,7 +79,7 @@ pub async fn sample_encode(mut args: Args) -> anyhow::Result<()> {
     );
     bar.enable_steady_tick(Duration::from_millis(100));
 
-    let probe = ffprobe::probe(&args.input);
+    let probe = ffprobe::probe(&args.input, false);
     args.sample.set_extension_from_input(&args.input, &probe);
     run(args, probe.into(), bar).await?;
     Ok(())
@@ -199,23 +199,6 @@ pub async fn run(
             (None, key) => {
                 bar.set_message("encoding,");
                 let b = Instant::now();
-                // let (encoded_sample, mut output) = ffmpeg::encode_sample(
-                //     FfmpegEncodeArgs {
-                //         input: &sample,
-                //         ..enc_args.clone()
-                //     },
-                //     temp_dir.clone(),
-                //     sample_args.extension.as_deref().unwrap_or("mkv"),
-                // )?;
-                // let (encoded_sample, mut output) = ffmpeg::encode_sample(
-                //     FfmpegEncodeArgs::from_enc(
-                //         sample.clone(),
-                //         temp_dir.clone(),
-                //         Arc::clone(&args_ref),
-                //         &input_probe,
-                //         true,
-                //     )
-                //     .unwrap(),
                 let ffmpeg_enc = FfmpegEncodeArgs::from_encoder(
                     sample.clone(),
                     None,
@@ -225,7 +208,7 @@ pub async fn run(
                     true,
                 )
                 .unwrap();
-                let (mut output) = ffmpeg_enc.encode(false, None, false)?;
+                let (mut output) = ffmpeg_enc.encode(input_probe.has_audio, None, false)?;
                 while let Some(progress) = output.next().await {
                     if let FfmpegOut::Progress { time, fps, .. } = progress? {
                         bar.set_position(
@@ -238,7 +221,7 @@ pub async fn run(
                 }
                 let encode_time = b.elapsed();
                 let encoded_size = fs::metadata(&ffmpeg_enc.output).await?.len();
-                let encoded_probe = ffprobe::probe(&ffmpeg_enc.output);
+                let encoded_probe = ffprobe::probe(&ffmpeg_enc.output, false);
 
                 // calculate vmaf
                 bar.set_message("vmaf running,");

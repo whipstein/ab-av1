@@ -48,7 +48,7 @@ pub async fn encode(args: Args) -> anyhow::Result<()> {
     );
     bar.enable_steady_tick(Duration::from_millis(100));
 
-    let probe = ffprobe::probe(&args.input);
+    let probe = ffprobe::probe(&args.input, false);
     run(args, probe.into(), &bar).await
 }
 

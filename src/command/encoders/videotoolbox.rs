@@ -1,5 +1,5 @@
 use crate::{
-    command::encoders::{Encoder, EncoderString, KeyInterval, Preset, VTPixelFormat},
+    command::encoders::{Encoder, EncoderString, KeyInterval, Preset},
     ffmpeg::FfmpegEncodeArgs,
     ffprobe::{Ffprobe, ProbeError},
     float::TerseF32,
@@ -51,7 +51,7 @@ pub struct VideotoolboxEncoder {
     ///
     /// [hevc_videotoolbox default: Quality(50)]
     #[arg(long)]
-    pub const_quality: Option<u8>,
+    pub quality: Option<f32>,
 
     /// Interval between keyframes. Can be specified as a number of frames, or a duration.
     /// E.g. "300" or "10s". Defaults to 10s if the input duration is over 3m.
@@ -67,14 +67,14 @@ pub struct VideotoolboxEncoder {
     ///
     /// See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/svt-av1_encoder_user_guide.md#options
     #[arg(long = "vt", value_parser = parse_vt_arg)]
-    pub vt_args: Vec<Arc<str>>,
+    pub lib_args: Vec<Arc<str>>,
 
     /// Additional ffmpeg encoder arg(s). E.g. `--enc x265-params=lossless=1`
     /// These are added as ffmpeg output file options.
     ///
     /// The first '=' symbol will be used to infer that this is an option with a value.
     /// Passed to ffmpeg like "x265-params=lossless=1" -> ['-x265-params', 'lossless=1']
-    #[arg(long = "enc", allow_hyphen_values = true, value_parser = parse_enc_arg)]
+    // #[arg(long = "enc", allow_hyphen_values = true, value_parser = parse_enc_arg)]
     pub enc_args: Vec<String>,
 
     /// Additional ffmpeg input encoder arg(s). E.g. `--enc-input r=1`
@@ -85,6 +85,25 @@ pub struct VideotoolboxEncoder {
     pub enc_input_args: Vec<String>,
 }
 
+fn parse_vt_arg(arg: &str) -> anyhow::Result<Arc<str>> {
+    let arg = arg.trim_start_matches('-').to_owned();
+
+    for deny in ["bitrate", "quality", "keyint", "input-depth"] {
+        ensure!(!arg.starts_with(deny), "'{deny}' cannot be used here");
+    }
+
+    Ok(arg.into())
+}
+
+fn parse_enc_arg(arg: &str) -> anyhow::Result<String> {
+    let mut arg = arg.to_owned();
+    if !arg.starts_with('-') {
+        arg.insert(0, '-');
+    }
+
+    Ok(arg)
+}
+
 impl Encoder for VideotoolboxEncoder {
     fn encode_hint(&self) -> String {
         let Self {
@@ -93,9 +112,9 @@ impl Encoder for VideotoolboxEncoder {
             vfilter,
             pix_format,
             bitrate,
-            const_quality,
+            quality,
             keyint,
-            vt_args,
+            lib_args,
             enc_args,
             enc_input_args,
         } = self;
@@ -111,8 +130,8 @@ impl Encoder for VideotoolboxEncoder {
         if let Some(bitrate) = bitrate {
             write!(hint, " --bitrate {bitrate}").unwrap();
         }
-        if let Some(const_quality) = const_quality {
-            write!(hint, " --quality {const_quality}").unwrap();
+        if let Some(quality) = quality {
+            write!(hint, " --quality {quality}").unwrap();
         }
         if let Some(keyint) = keyint {
             write!(hint, " --keyint {keyint}").unwrap();
@@ -123,8 +142,8 @@ impl Encoder for VideotoolboxEncoder {
         if let Some(filter) = vfilter {
             write!(hint, " --vfilter {filter:?}").unwrap();
         }
-        for arg in vt_args {
-            write!(hint, " --svt {arg}").unwrap();
+        for arg in lib_args {
+            write!(hint, " --vt {arg}").unwrap();
         }
         for arg in enc_input_args {
             let arg = arg.trim_start_matches('-');
@@ -161,30 +180,45 @@ impl Encoder for VideotoolboxEncoder {
             },
         )
     }
+
+    fn search_params(&self) -> Vec<&str> {
+        vec!["bitrate", "quality"]
+    }
 }
 
-fn parse_vt_arg(arg: &str) -> anyhow::Result<Arc<str>> {
-    let arg = arg.trim_start_matches('-').to_owned();
-
-    for deny in ["bitrate", "quality", "keyint", "input-depth"] {
-        ensure!(!arg.starts_with(deny), "'{deny}' cannot be used here");
-    }
-
-    Ok(arg.into())
+/// Ordered by ascending quality.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[clap(rename_all = "lower")]
+pub enum VTPixelFormat {
+    Yuv420p,
+    P010le,
 }
 
-fn parse_enc_arg(arg: &str) -> anyhow::Result<String> {
-    let mut arg = arg.to_owned();
-    if !arg.starts_with('-') {
-        arg.insert(0, '-');
+impl VTPixelFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Yuv420p => "yuv420p",
+            Self::P010le => "p010le",
+        }
     }
+}
 
-    ensure!(
-        !arg.starts_with("-svtav1-params"),
-        "'svtav1-params' cannot be set here, use `--svt`"
-    );
+impl fmt::Display for VTPixelFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
 
-    Ok(arg)
+impl TryFrom<&str> for VTPixelFormat {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "yuv420p" => Ok(Self::Yuv420p),
+            "p010le" => Ok(Self::P010le),
+            _ => Err(()),
+        }
+    }
 }
 
 // mod test {
@@ -195,13 +229,13 @@ fn parse_enc_arg(arg: &str) -> anyhow::Result<String> {
 //     fn svtav1_to_ffmpeg_args_default_over_3m() {
 //         let enc = VideotoolboxEncoder {
 //             encoder: EncoderString("hevc_videotoolbox".into()),
-//             input: "vid.mp4".into(),
+//             // input: "vid.mp4".into(),
 //             vfilter: Some("scale=320:-1,fps=film".into()),
 //             bitrate: Some(1000),
-//             const_quality: None,
+//             quality: None,
 //             pix_format: None,
 //             keyint: None,
-//             svt_args: vec!["film-grain=30".into()],
+//             lib_args: vec!["film-grain=30".into()],
 //             enc_args: <_>::default(),
 //             enc_input_args: <_>::default(),
 //         };
@@ -216,6 +250,7 @@ fn parse_enc_arg(arg: &str) -> anyhow::Result<String> {
 //             pix_fmt: None,
 //         };
 
+//         let FfmpegEncodeArgs { input, output, enc, vcodec, vfilter, pix_fmt, output_args, input_args, video_only }
 //         let FfmpegEncodeArgs {
 //             input,
 //             vcodec,
@@ -261,7 +296,7 @@ fn parse_enc_arg(arg: &str) -> anyhow::Result<String> {
 //             input: "vid.mp4".into(),
 //             vfilter: None,
 //             bitrate: None,
-//             const_quality: Some(20),
+//             quality: Some(20),
 //             pix_format: Some(PixelFormat::Yuv420p),
 //             keyint: None,
 //             svt_args: vec![],

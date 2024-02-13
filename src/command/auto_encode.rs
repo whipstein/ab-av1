@@ -38,7 +38,7 @@ pub async fn auto_encode(Args { mut search, encode }: Args) -> anyhow::Result<()
 
     search.quiet = true;
     let defaulting_output = encode.output.is_none();
-    let input_probe = Arc::new(ffprobe::probe(&search.input));
+    let input_probe = Arc::new(ffprobe::probe(&search.input, false));
 
     let output = encode.output.unwrap_or_else(|| {
         default_output_name(&search.input, &search.args.encoder, input_probe.is_image)

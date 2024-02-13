@@ -105,7 +105,7 @@ pub async fn bitrate_search(mut args: Args) -> anyhow::Result<()> {
             .progress_chars(PROGRESS_CHARS)
     );
 
-    let probe = ffprobe::probe(&args.input);
+    let probe = ffprobe::probe(&args.input, false);
     let input_is_image = probe.is_image;
     args.sample.set_extension_from_input(&args.input, &probe);
 
